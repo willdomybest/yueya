@@ -1,7 +1,5 @@
 # RemoteFM
 
-<img src="assets/icon.png" width="72" alt="蓝色月牙图标">
-
 **中文** | [English](README_EN.md)
 
 一个 Python 文件，把电脑变成浏览器里的文件管理器：文件浏览、上传下载、在线预览、压缩解压、FTP、网页终端。

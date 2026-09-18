@@ -7,3 +7,8 @@ venv/
 .DS_Store
 Thumbs.db
 *.log
+
+# 打包产物
+build/
+dist/
+*.spec
