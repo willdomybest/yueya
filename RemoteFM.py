@@ -127,7 +127,7 @@ def _check_auth(u, p):
 
 
 def _need_login():
-    if request.path in ('/login', '/favicon.ico'):
+    if request.path in ('/login', '/favicon.ico', '/favicon.svg'):
         return False
     if session.get('logged_in'):
         return False
@@ -147,10 +147,20 @@ def _require_login():
 
 
 # ================= 登录页 =================
+ICON_SVG = '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64"><path fill="#4a6cf7" fill-rule="evenodd" d="M6 32 A26 26 0 1 1 58 32 A26 26 0 1 1 6 32 Z M24 32 A22 22 0 1 1 68 32 A22 22 0 1 1 24 32 Z"/></svg>'''
+
+
+@app.route('/favicon.ico')
+@app.route('/favicon.svg')
+def favicon():
+    return Response(ICON_SVG, mimetype='image/svg+xml', headers={'Cache-Control': 'public, max-age=86400'})
+
+
 LOGIN_PAGE = r'''<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>登录 - 文件管理器</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<title>登录 - 因热爱而行动</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;background:linear-gradient(135deg,#4a6cf7,#6a4af7);min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
@@ -570,7 +580,7 @@ def get_procs(force=False):
 
 # ================= 前端 =================
 # 注意：终端面板现在位于 .app 内部（.main 之后），不是 fixed，会挤压文件列表
-TPL = r'''<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>文件管理器</title>
+TPL = r'''<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><title>因热爱而行动</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}html,body{height:100%}
 body{font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;font-size:14px;background:#f5f6fa;color:#2c3e50;overflow:hidden}

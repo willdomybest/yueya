@@ -1,5 +1,7 @@
 # RemoteFM
 
+<img src="assets/icon.png" width="72" alt="Blue crescent moon icon">
+
 [中文](README.md) | **English**
 
 A single Python file that turns any computer into a browser-based file manager: file browsing,
