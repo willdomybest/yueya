@@ -147,7 +147,9 @@ def _require_login():
 
 
 # ================= 登录页 =================
-ICON_SVG = '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64"><path fill="#4a6cf7" fill-rule="evenodd" d="M6 32 A26 26 0 1 1 58 32 A26 26 0 1 1 6 32 Z M24 32 A22 22 0 1 1 68 32 A22 22 0 1 1 24 32 Z"/></svg>'''
+ICON_SVG = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">'
+            '<path fill="#4a6cf7" transform="rotate(-20 32 32)" '
+            'd="M37 6.49A26 26 0 1 0 37 57.51A26 26 0 0 1 37 6.49Z"/></svg>')
 
 
 @app.route('/favicon.ico')
