@@ -97,6 +97,11 @@ stored as random-salt SHA-256 hashes. If that directory is not writable it falls
 `~/.remotefm/users.json`; you can also set `SD_USERS`. Leave the root directory empty when adding a user and
 a folder with the same name is created under the superuser's root.
 
+**The root directory itself may be empty too**: empty means "the whole computer" — the list shows every
+drive (C:/, D:/ … on Windows) and you can browse anywhere. Setting `SD_ROOT` to an empty string does the
+same for the superuser. User management is a full-screen panel like the process manager: accounts and their
+roots on the left, add-user / change-password forms in place on the right, with no dialog covering the page.
+
 Windows (PowerShell):
 
 ```powershell
