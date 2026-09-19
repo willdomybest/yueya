@@ -15,7 +15,7 @@ RemoteFM —— 单文件远程文件管理器（网页文件管理 + FTP + 网�
 # requires-python = ">=3.8"
 # dependencies = ["flask>=2.0", "requests>=2.25", "pyftpdlib>=1.5.7"]
 # ///
-import os, sys, time, shutil, zipfile, json, uuid, threading, logging, tempfile, subprocess, signal, queue, re, shlex, socket, platform as sysplat
+import os, sys, time, shutil, zipfile, json, uuid, threading, logging, tempfile, subprocess, signal, queue, re, shlex, socket, hashlib, platform as sysplat
 from urllib.parse import urlparse, unquote
 from flask import Flask, request, send_file, render_template_string, jsonify, Response, stream_with_context, abort, session, redirect
 from werkzeug.utils import secure_filename
@@ -73,12 +73,109 @@ else:
     _default_root = os.path.expanduser('~')
 _cfg = {'root': _default_root}
 
-# ================= 认证配置（网页 + FTP 共用） =================
+# ================= 用户与认证（超级用户 + 普通用户） =================
 _auth = {
     'user': os.environ.get('SD_USER', 'admin'),
     'pass': os.environ.get('SD_PASS', 'admin123'),
 }
 _IS_DEFAULT_AUTH = (_auth['user'] == 'admin' and _auth['pass'] == 'admin123')
+
+
+def _app_dir():
+    """打包成 exe 时取 exe 所在目录，否则取脚本目录。"""
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def _pick_users_file():
+    """用户存储位置：SD_USERS > 程序目录 > 用户主目录 > 临时目录。"""
+    cands = []
+    env = os.environ.get('SD_USERS', '').strip()
+    if env:
+        cands.append(os.path.abspath(env))
+    cands.append(os.path.join(_app_dir(), 'users.json'))
+    cands.append(os.path.join(os.path.expanduser('~'), '.remotefm', 'users.json'))
+    for p in cands:
+        try:
+            os.makedirs(os.path.dirname(p) or '.', exist_ok=True)
+            with open(p, 'a', encoding='utf-8'):
+                pass
+            return p
+        except OSError:
+            continue
+    return os.path.join(tempfile.gettempdir(), 'remotefm-users.json')
+
+
+USERS_FILE = _pick_users_file()
+_users_lock = threading.Lock()
+_users = {}          # name -> {'salt','hash','admin','root'}
+
+
+def _pw_hash(pw, salt=None):
+    salt = salt or os.urandom(8).hex()
+    return salt, hashlib.sha256((salt + pw).encode('utf-8')).hexdigest()
+
+
+def load_users():
+    global _users
+    try:
+        with open(USERS_FILE, encoding='utf-8') as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        data = {}
+    users = {}
+    for u in (data.get('users') or []):
+        n = (u.get('name') or '').strip()
+        if not n or not u.get('salt') or not u.get('hash'):
+            continue
+        users[n] = {'salt': u['salt'], 'hash': u['hash'],
+                    'admin': bool(u.get('admin')), 'root': u.get('root') or ''}
+    _users = users
+
+
+def save_users():
+    with _users_lock:
+        data = {'users': [dict(name=n, **v) for n, v in sorted(_users.items())]}
+        try:
+            with open(USERS_FILE + '.tmp', 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            os.replace(USERS_FILE + '.tmp', USERS_FILE)
+            return True
+        except OSError as e:
+            logging.warning('保存用户信息失败: %s', e)
+            return False
+
+
+def _verify(name, pw):
+    """已改过密码的账号走哈希校验，未改过的超级用户走 SD_PASS。"""
+    rec = _users.get(name)
+    if rec:
+        return hashlib.sha256((rec['salt'] + pw).encode('utf-8')).hexdigest() == rec['hash']
+    return name == _auth['user'] and pw == _auth['pass']
+
+
+def current_user():
+    """当前登录用户；后台线程/启动阶段没有会话时按超级用户处理。"""
+    name = _auth['user']
+    try:
+        name = session.get('user') or name
+    except RuntimeError:
+        pass
+    if name == _auth['user']:
+        return {'name': name, 'admin': True, 'root': _cfg['root']}
+    rec = _users.get(name)
+    if rec:
+        return {'name': name, 'admin': bool(rec.get('admin')),
+                'root': rec['root'] if rec.get('root') else _cfg['root']}
+    return {'name': _auth['user'], 'admin': True, 'root': _cfg['root']}
+
+
+def is_admin():
+    return current_user()['admin']
+
+
+load_users()
 
 # ================= FTP 服务器 =================
 FTP_ENABLED = _env_flag('SD_FTP', True)
@@ -123,7 +220,7 @@ _proc_cache = {'data': None, 'ts': 0}
 
 # ================= 认证 =================
 def _check_auth(u, p):
-    return u == _auth['user'] and p == _auth['pass']
+    return bool(u) and _verify(u, p)
 
 
 def _need_login():
@@ -134,8 +231,16 @@ def _need_login():
     a = request.authorization
     if a and _check_auth(a.username, a.password):
         session['logged_in'] = True
+        session['user'] = a.username
         return False
     return True
+
+
+def _admin_only():
+    """超级用户专属接口的统一拦截。"""
+    if not is_admin():
+        return jsonify({'success': False, 'error': '需要超级用户权限'}), 403
+    return None
 
 
 @app.before_request
@@ -220,6 +325,7 @@ def login():
     p = request.form.get('password') or ''
     if _check_auth(u, p):
         session['logged_in'] = True
+        session['user'] = u
         session.permanent = True
         return redirect('/')
     return render_template_string(
@@ -236,7 +342,11 @@ def logout():
     return redirect('/login')
 
 
-def get_root(): return _cfg['root']
+def get_root():
+    """当前用户可见的根目录（普通用户为自己的根目录）。"""
+    return current_user()['root']
+
+
 def set_root(p):
     try:
         p = os.path.abspath(p)
@@ -327,10 +437,24 @@ def dl_to_server(url, tid):
         dl_tasks[tid].update({'status':'failed','message':f'下载失败: {e}'})
 
 
-def abspath(rp):
-    ar = os.path.abspath(get_root())
+def _inside(path, root):
+    p = os.path.normcase(os.path.abspath(path))
+    r = os.path.normcase(os.path.abspath(root))
+    return p == r or p.startswith(r.rstrip('\\/') + os.sep)
+
+
+def abspath(rp, root=None):
+    """把相对路径解析成绝对路径，并强制留在根目录内（含软链接逃逸检查）。"""
+    ar = os.path.abspath(root or get_root())
     ap = os.path.abspath(os.path.join(ar, rp))
-    return ar if not ap.startswith(ar) else ap
+    if not _inside(ap, ar):
+        return ar
+    try:
+        if os.path.exists(ap) and not _inside(os.path.realpath(ap), os.path.realpath(ar)):
+            return ar
+    except OSError:
+        pass
+    return ap
 
 
 def list_items(cap, kw='', sb='name', od='asc'):
@@ -349,7 +473,7 @@ def list_items(cap, kw='', sb='name', od='asc'):
         elif sz < 1024**3: ss = f'{sz/(1024*1024):.1f}MB'
         else: ss = f'{sz/(1024**3):.2f}GB'
         ext = n.rsplit('.', 1)[1].lower() if (not isd and '.' in n) else ''
-        items.append({'name':n,'path':os.path.relpath(ap, get_root()).replace(os.sep,'/'),'is_dir':isd,'size':sz,'size_str':ss,'ext':ext,'mtime':st.st_mtime,'mtime_str':fnow(st.st_mtime)})
+        items.append({'name':n,'path':os.path.relpath(ap, get_root()).replace(os.sep,'/'),'abs':ap,'is_dir':isd,'size':sz,'size_str':ss,'ext':ext,'mtime':st.st_mtime,'mtime_str':fnow(st.st_mtime)})
     rev = (od == 'desc')
     if sb == 'name': items.sort(key=lambda x: (not x['is_dir'], x['name'].lower()), reverse=rev)
     elif sb == 'size': items.sort(key=lambda x: x['size'], reverse=rev)
@@ -415,13 +539,13 @@ def copy_tree_with_progress(src, dst, task_id, src_root_size, already_done):
             copy_file_with_progress(s, d, task_id, src_root_size, already_done)
 
 
-def bg_batch_task(task_id, paths, target, operation):
+def bg_batch_task(task_id, paths, target, operation, root=None):
     bg_tasks[task_id] = {
         'type': operation, 'status': 'running', 'progress': 0,
         'message': '正在计算大小…', 'total': len(paths), 'done': 0,
         'errors': [], 'src': paths, 'dst': target,
     }
-    at = abspath(target)
+    at = abspath(target, root)
     try:
         os.makedirs(at, exist_ok=True)
     except Exception as e:
@@ -431,7 +555,7 @@ def bg_batch_task(task_id, paths, target, operation):
     total_size = 0
     items = []
     for p in paths:
-        src = abspath(p)
+        src = abspath(p, root)
         if not os.path.exists(src):
             bg_tasks[task_id]['errors'].append(f'{p}: 不存在')
             continue
@@ -615,7 +739,30 @@ body{font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;font-size
 .breadcrumb .sep{color:#a0a8b8;margin:0 2px}
 .search-box{display:flex;align-items:center;border:1px solid #dfe3eb;border-radius:6px;padding:0 8px;background:#fff;height:32px;width:200px}
 .search-box input{border:0;outline:0;flex:1;font-size:13px;padding:4px;background:transparent}
-.main{flex:1;min-height:0;overflow:hidden;background:#fff;display:flex;flex-direction:column}
+.main{flex:1;min-height:0;overflow:hidden;background:#fff;display:flex;flex-direction:row}
+.content{flex:1;min-width:0;display:flex;flex-direction:column}
+.sidebar{width:220px;flex-shrink:0;border-right:1px solid #e6e8ec;background:#fafbfc;display:flex;flex-direction:column;min-height:0}
+.side-head{display:flex;align-items:center;justify-content:space-between;padding:8px 10px;font-size:12px;color:#7a8299;border-bottom:1px solid #ebedf1;font-weight:600}
+.side-btn{border:0;background:transparent;cursor:pointer;font-size:12px;color:#7a8299}
+.tree{flex:1;overflow:auto;padding:6px 4px;font-size:13px}
+.tree-node{white-space:nowrap}
+.tree-row{display:flex;align-items:center;gap:4px;padding:3px 6px;border-radius:5px;cursor:pointer;color:#4a5568}
+.tree-row:hover{background:#eef1f8}
+.tree-row.active{background:#4a6cf7;color:#fff}
+.tree-tog{width:14px;text-align:center;color:#9aa3b5;font-size:11px;user-select:none}
+.tree-row.active .tree-tog{color:#fff}
+.tree-label{overflow:hidden;text-overflow:ellipsis}
+.tree-kids{margin-left:12px;border-left:1px dashed #e0e4ec;padding-left:2px}
+.tree-empty{color:#b3b9c7;font-size:12px;padding:3px 8px}
+.picker-box{height:300px;overflow:auto;border:1px solid #e6e8ec;border-radius:6px;padding:6px;background:#fafbfc}
+.picker-path{font-family:Consolas,monospace;font-size:12px;color:#4a5568;background:#f4f6fa;border-radius:5px;padding:6px 8px;margin-bottom:10px;word-break:break-all}
+.user-row{display:flex;align-items:center;gap:8px;padding:6px 8px;border-bottom:1px solid #f0f2f7;font-size:13px}
+.user-row .uname{font-weight:600;color:#2c3e50;min-width:104px}
+.user-row .uroot{color:#7a8299;font-family:Consolas,monospace;font-size:11.5px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.user-row button.mini{padding:2px 8px;font-size:12px;border:1px solid #dfe3eb;background:#fff;border-radius:4px;cursor:pointer;color:#4a5568}
+.user-row button.mini.danger{color:#e74c3c;border-color:#fdd6d6}
+.modal h3 .tag{font-size:11px;font-weight:400;color:#7a8299;margin-left:6px}
+@media (max-width:760px){.sidebar{display:none}}
 .file-area{flex:1;min-height:0;overflow:auto;position:relative}
 .file-area.dragover::after{content:"松开鼠标上传文件到此处";position:absolute;inset:0;background:rgba(74,108,247,.1);border:3px dashed #4a6cf7;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:20px;color:#4a6cf7;font-weight:600;z-index:10;pointer-events:none}
 table.file-table{width:100%;border-collapse:collapse}
@@ -818,8 +965,14 @@ table.process-table tbody tr:hover .process-actions{opacity:1}
 <button class="btn" onclick="showRemoteDownload()">🌐 远程下载</button>
 <button class="btn" id="btnTerminal" onclick="toggleTerminal()">💻 终端</button>
 <button class="btn" id="btnProcess" onclick="openProcessPanel()">⚙️ 进程</button>
+<button class="btn" id="btnUsers" onclick="openUserModal()">👤 <span id="userName">用户</span></button>
 </div>
-<div class="main"><div class="file-area" id="fileArea">
+<div class="main">
+<div class="sidebar" id="sidebar">
+<div class="side-head"><span>📚 资源目录</span><button class="side-btn" onclick="treeInit()" title="刷新目录树">🔄</button></div>
+<div class="tree" id="treeRoot"></div>
+</div>
+<div class="content"><div class="file-area" id="fileArea">
 <table class="file-table"><thead><tr>
 <th class="sortable" style="width:45%">名称 <span class="sort-arrow" id="sortName"></span></th>
 <th class="sortable" style="width:180px">修改日期 <span class="sort-arrow" id="sortMtime"></span></th>
@@ -829,7 +982,8 @@ table.process-table tbody tr:hover .process-actions{opacity:1}
 <div class="empty-state" id="emptyState" style="display:none"><div class="icon">📭</div><div class="text">此文件夹为空</div></div>
 </div>
 <div class="statusbar"><span id="statusText">准备就绪</span><div class="right"><span id="selectionText"></span></div></div>
-</div>
+</div><!-- /.content -->
+</div><!-- /.main -->
 
 <!-- 终端面板：现在位于 .app 内部，是 flex 布局的一部分 -->
 <div class="terminal-panel collapsed" id="terminalPanel">
@@ -873,6 +1027,30 @@ table.process-table tbody tr:hover .process-actions{opacity:1}
 <div class="modal-bg" id="mkdirModal"><div class="modal"><h3>新建文件夹</h3><div class="form-row"><label>文件夹名称</label><input type="text" id="mkdirName" onkeydown="if(event.key==='Enter')doMkdir()"></div><div class="actions"><button onclick="closeModal('mkdirModal')">取消</button><button class="primary" onclick="doMkdir()">创建</button></div></div></div>
 <div class="modal-bg" id="compressModal"><div class="modal"><h3>压缩为 ZIP</h3><div class="form-row"><label>压缩包名称</label><input type="text" id="compressName" placeholder="archive.zip"></div><div class="actions"><button onclick="closeModal('compressModal')">取消</button><button class="primary" onclick="doCompress()">开始压缩</button></div></div></div>
 <div class="modal-bg" id="remoteModal"><div class="modal"><h3>远程文件下载</h3><div class="form-row"><label>文件 URL</label><input type="url" id="remoteUrl" placeholder="https://example.com/file.zip"></div><div class="progress-wrap" id="remoteProgressWrap" style="display:none;height:22px;border-radius:11px"><div class="fill" id="remoteProgressFill"></div></div><div id="remoteStatus" style="font-size:12px;color:#7a8299;margin-top:8px"></div><div class="actions"><button onclick="closeModal('remoteModal')">关闭</button><button onclick="downloadToLocal()">下载到本地</button><button class="primary" onclick="downloadToServer()">下载到服务器</button></div></div></div>
+
+<div class="modal-bg" id="renameModal"><div class="modal"><h3>重命名</h3><div class="form-row"><label>新名称</label><input type="text" id="renameInput" onkeydown="if(event.key==='Enter')doRename()"><div class="hint">只改名称，不能输入路径分隔符</div></div><div class="actions"><button onclick="closeModal('renameModal')">取消</button><button class="primary" onclick="doRename()">确定</button></div></div></div>
+
+<div class="modal-bg" id="pickerModal"><div class="modal" style="max-width:560px"><h3 id="pickerTitle">选择目标目录</h3><div class="picker-path" id="pickerPath">/</div><div class="picker-box" id="pickerTree"></div><div class="actions"><button onclick="closeModal('pickerModal')">取消</button><button class="primary" onclick="pickerOk()">选择此目录</button></div></div></div>
+
+<div class="modal-bg" id="userModal"><div class="modal" style="max-width:620px"><h3>用户管理 <span class="tag" id="userTag"></span></h3>
+<div id="userAdminBox">
+<div class="form-row"><label>普通用户列表</label><div id="userList" style="max-height:180px;overflow:auto;border:1px solid #e6e8ec;border-radius:6px"></div><div class="hint">用户数据保存位置：<span id="userFile" style="font-family:Consolas,monospace"></span></div></div>
+<div class="form-row"><label>添加普通用户</label>
+<input type="text" id="newUserName" placeholder="用户名" style="margin-bottom:6px">
+<input type="text" id="newUserPass" placeholder="密码（至少 4 位）" style="margin-bottom:6px">
+<input type="text" id="newUserRoot" placeholder="根目录绝对路径（留空 = 在根目录下创建同名文件夹）" style="margin-bottom:6px">
+<div style="display:flex;gap:8px"><button onclick="pickUserRoot()">📂 浏览目录</button><button class="primary" onclick="addUser()">添加用户</button></div>
+<div class="hint">普通用户只能在自己根目录内浏览、上传、下载、复制、移动、删除，且看不到终端与进程。</div>
+</div>
+<div class="divider-line" style="height:1px;background:#eef1f8;margin:14px 0"></div>
+</div>
+<div class="form-row"><label>修改密码</label>
+<input type="text" id="pwName" placeholder="用户名" style="margin-bottom:6px">
+<input type="password" id="pwOld" placeholder="原密码（修改自己的密码时必填）" style="margin-bottom:6px">
+<input type="password" id="pwNew" placeholder="新密码（至少 4 位）" style="margin-bottom:6px">
+<button class="primary" onclick="doPasswd()">修改密码</button>
+</div>
+<div class="actions"><button onclick="closeModal('userModal')">关闭</button></div></div></div>
 
 <div class="modal-bg" id="uploadModeModal">
   <div class="modal">
@@ -1022,10 +1200,10 @@ function copyFtpCmd(){
 
 async function load(path,push=true){try{const d=await apiList(path);currentPath=d.path||'';currentItems=d.items||[];selected.clear();lastIdx=-1;
 if(push){histStack=histStack.slice(0,histIdx+1);if(histStack[histStack.length-1]!==currentPath){histStack.push(currentPath);histIdx=histStack.length-1}}
-render();updCrumb();updNav();updStatus();updTermCwd()}catch(e){toast('加载失败: '+e.message,'error')}}
+ render();updCrumb();updNav();updStatus();updTermCwd();treeReveal()}catch(e){toast('加载失败: '+e.message,'error')}}
 function render(){const tb=$('fileList'),emp=$('emptyState');if(!currentItems.length){tb.innerHTML='';emp.style.display='block';return}emp.style.display='none';
 let h='';currentItems.forEach((it,idx)=>{const sel=selected.has(it.path)?'selected':'';const prev=isPrev(it);
-h+=`<tr class="${sel}" data-idx="${idx}" data-path="${esc(it.path)}"><td class="name-cell"><span class="file-icon">${fileIcon(it)}</span><span>${esc(it.name)}</span></td><td>${esc(it.mtime_str)}</td><td>${esc(it.size_str)}</td><td><div class="row-actions">${prev?`<button onclick="event.stopPropagation();openPreview(currentItems[${idx}])">查看</button>`:''}${it.is_dir?'':`<button onclick="event.stopPropagation();downloadFile('${esc(it.path)}')">下载</button>`}${it.ext==='zip'?`<button onclick="event.stopPropagation();extractOne('${esc(it.path)}')">解压</button>`:''}<button class="danger" onclick="event.stopPropagation();deleteOne('${esc(it.path)}','${esc(it.name)}')">删除</button></div></td></tr>`});
+h+=`<tr class="${sel}" data-idx="${idx}" data-path="${esc(it.path)}"><td class="name-cell"><span class="file-icon">${fileIcon(it)}</span><span>${esc(it.name)}</span></td><td>${esc(it.mtime_str)}</td><td>${esc(it.size_str)}</td><td><div class="row-actions">${prev?`<button onclick="event.stopPropagation();openPreview(currentItems[${idx}])">查看</button>`:''}${it.is_dir?'':`<button onclick="event.stopPropagation();downloadFile('${esc(it.path)}')">下载</button>`}${it.ext==='zip'?`<button onclick="event.stopPropagation();extractOne('${esc(it.path)}')">解压</button>`:''}<button onclick="event.stopPropagation();showRename(currentItems[${idx}])">重命名</button><button class="danger" onclick="event.stopPropagation();deleteOne('${esc(it.path)}','${esc(it.name)}')">删除</button></div></td></tr>`});
 tb.innerHTML=h;tb.querySelectorAll('tr').forEach(tr=>{tr.addEventListener('click',onRowClick);tr.addEventListener('dblclick',onRowDblClick);tr.addEventListener('contextmenu',onRowCtx)});
 $('sortName').textContent=sortBy==='name'?(order==='asc'?'▲':'▼'):'';$('sortMtime').textContent=sortBy==='mtime'?(order==='asc'?'▲':'▼'):'';$('sortSize').textContent=sortBy==='size'?(order==='asc'?'▲':'▼'):''}
 function updCrumb(){const bc=$('breadcrumb');let h=`<span class="crumb ${currentPath===''?'current':''}" onclick="navigate('')">🏠 根目录</span>`;const parts=currentPath.split('/').filter(Boolean);let acc='';
@@ -1051,7 +1229,11 @@ const allZip=items.length>0&&items.every(i=>!i.is_dir&&i.ext==='zip');const sing
 let h='';if(single){const it=items[0];if(it.is_dir)h+=`<div class="item" onclick="ctxOpen()"><span class="icon">📂</span>打开</div>`;else{if(isPrev(it))h+=`<div class="item" onclick="ctxPreview()"><span class="icon">👁️</span>查看</div>`;h+=`<div class="item" onclick="ctxDownload()"><span class="icon">⬇️</span>下载</div>`}h+=`<div class="divider"></div>`}
 h+=`<div class="item" onclick="ctxCompress()"><span class="icon">🗜️</span>压缩为 ZIP</div>`;
 if(allZip)h+=`<div class="item" onclick="ctxExtract()"><span class="icon">📤</span>解压</div>`;
-h+=`<div class="divider"></div><div class="item" onclick="ctxCopyMove('copy')"><span class="icon">📋</span>复制到…</div><div class="item" onclick="ctxCopyMove('move')"><span class="icon">✂️</span>移动到…</div><div class="divider"></div><div class="item danger" onclick="ctxDelete()"><span class="icon">🗑️</span>删除</div>`;
+h+=`<div class="divider"></div><div class="item" onclick="ctxCopyMove('copy')"><span class="icon">📋</span>复制到…</div><div class="item" onclick="ctxCopyMove('move')"><span class="icon">✂️</span>移动到…</div>`+
+   `<div class="item" onclick="ctxRename()"><span class="icon">✏️</span>重命名</div>`+
+   `<div class="item" onclick="ctxCopyName()"><span class="icon">🔤</span>复制名称</div>`+
+   `<div class="item" onclick="ctxCopyPath()"><span class="icon">📍</span>复制绝对路径</div>`+
+   `<div class="divider"></div><div class="item danger" onclick="ctxDelete()"><span class="icon">🗑️</span>删除</div>`;
 m.innerHTML=h;m.classList.add('show');const r=m.getBoundingClientRect();m.style.left=Math.min(x,innerWidth-r.width-8)+'px';m.style.top=Math.min(y,innerHeight-r.height-8)+'px'}
 document.addEventListener('click',()=>$('ctxMenu').classList.remove('show'));
 document.addEventListener('scroll',()=>$('ctxMenu').classList.remove('show'),true);
@@ -1061,7 +1243,12 @@ function ctxDownload(){Array.from(selected).forEach(p=>downloadFile(p))}
 function ctxDelete(){deleteMany(Array.from(selected))}
 async function ctxCompress(){$('compressName').value='archive.zip';$('compressModal').classList.add('show');$('compressName').focus();$('compressName').select();window._cp=Array.from(selected)}
 async function ctxExtract(){const ps=Array.from(selected);try{const r=await fretry('/api/extract',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({paths:ps,target:currentPath})});const d=await r.json();if(d.success){toast(`已解压 ${d.results.filter(x=>x.success).length}/${ps.length}`,'success');refresh()}else toast(d.error||'失败','error')}catch(e){toast(e.message,'error')}}
-function ctxCopyMove(op){const ps=Array.from(selected);const t=prompt(`请输入${op==='copy'?'复制':'移动'}目标路径（相对根目录）:`, '');if(t===null)return;startBgTask(ps,t,op)}
+function ctxCopyMove(op){const ps=Array.from(selected);if(!ps.length)return;
+ pickerOpen(op==='copy'?'选择复制到哪个目录':'选择移动到哪个目录',t=>startBgTask(ps,t,op),currentPath)}
+function curOne(){return currentItems.find(i=>i.path===Array.from(selected)[0])}
+function ctxRename(){const it=curOne();if(it)showRename(it)}
+function ctxCopyName(){const it=curOne();if(it)copyText(it.name,'已复制名称')}
+function ctxCopyPath(){const it=curOne();if(it)copyText(it.abs||it.path,'已复制绝对路径')}
 
 async function startBgTask(paths,target,operation){
     try{
@@ -1382,7 +1569,137 @@ async function procKill(pid,name,btn){
     finally{if(wasAuto)startProcAuto()}
 }
 
-(async()=>{await loadInitRoot();await loadFtpInfo();load('');initTerm()})();
+/* ================= 目录树 / 目录选择器 / 重命名 / 用户管理 ================= */
+const treeIndex={};
+async function treeFetch(path){const r=await fretry('/api/tree?path='+encodeURIComponent(path));const d=await r.json();return d.dirs||[]}
+async function treeEnsure(kids,tog,path,factory){
+  if(kids.dataset.loaded!=='1'){
+    kids.innerHTML='<div class="tree-empty">加载中…</div>';
+    let dirs=[];try{dirs=await treeFetch(path)}catch(e){}
+    kids.innerHTML='';
+    if(!dirs.length)kids.innerHTML='<div class="tree-empty">（无子目录）</div>';
+    else dirs.forEach(d=>kids.appendChild(factory(d.path,d.name)));
+    kids.dataset.loaded='1';
+  }
+  kids.style.display='';tog.textContent='▾';
+}
+function treeToggle(kids,tog,path,factory){
+  if(kids.style.display==='none')treeEnsure(kids,tog,path,factory);
+  else{kids.style.display='none';tog.textContent='▸'}
+}
+function treeNode(path,name){
+  const wrap=document.createElement('div');wrap.className='tree-node';
+  const row=document.createElement('div');row.className='tree-row';row.dataset.path=path;
+  const tog=document.createElement('span');tog.className='tree-tog';tog.textContent='▸';
+  const lbl=document.createElement('span');lbl.className='tree-label';lbl.textContent=name||'🏠 根目录';lbl.title=path||'/';
+  const kids=document.createElement('div');kids.className='tree-kids';kids.style.display='none';
+  row.appendChild(tog);row.appendChild(lbl);wrap.appendChild(row);wrap.appendChild(kids);
+  tog.onclick=ev=>{ev.stopPropagation();treeToggle(kids,tog,path,treeNode)};
+  row.onclick=()=>navigate(path);
+  row.ondblclick=ev=>{ev.stopPropagation();treeToggle(kids,tog,path,treeNode)};
+  treeIndex[path]={row:row,kids:kids,tog:tog};
+  return wrap;
+}
+async function treeInit(){const box=$('treeRoot');if(!box)return;box.innerHTML='';box.appendChild(treeNode('','🏠 根目录'));
+  const n=treeIndex[''];if(n)await treeEnsure(n.kids,n.tog,'',treeNode);treeMark()}
+function treeMark(){document.querySelectorAll('#treeRoot .tree-row.active').forEach(e=>e.classList.remove('active'));
+  const n=treeIndex[currentPath];if(n)n.row.classList.add('active')}
+async function treeReveal(){const parts=currentPath.split('/').filter(Boolean);let cur='';
+  for(const p of parts){const n=treeIndex[cur];if(!n)break;if(n.kids.dataset.loaded!=='1')await treeEnsure(n.kids,n.tog,cur,treeNode);cur=cur?cur+'/'+p:p}
+  treeMark()}
+
+let pickerCb=null,pickerTarget='',pickerIdx={};
+function pickerNode(path,name){
+  const wrap=document.createElement('div');wrap.className='tree-node';
+  const row=document.createElement('div');row.className='tree-row';row.dataset.path=path;
+  const tog=document.createElement('span');tog.className='tree-tog';tog.textContent='▸';
+  const lbl=document.createElement('span');lbl.className='tree-label';lbl.textContent=name||'🏠 根目录';lbl.title=path||'/';
+  const kids=document.createElement('div');kids.className='tree-kids';kids.style.display='none';
+  row.appendChild(tog);row.appendChild(lbl);wrap.appendChild(row);wrap.appendChild(kids);
+  tog.onclick=ev=>{ev.stopPropagation();treeToggle(kids,tog,path,pickerNode)};
+  row.onclick=()=>pickerPick(path,row);
+  row.ondblclick=ev=>{ev.stopPropagation();treeToggle(kids,tog,path,pickerNode)};
+  pickerIdx[path]={row:row,kids:kids,tog:tog};
+  return wrap;
+}
+function pickerPick(path,row){
+  pickerTarget=path;$('pickerPath').textContent=path||'/';
+  document.querySelectorAll('#pickerTree .tree-row.active').forEach(e=>e.classList.remove('active'));
+  if(row)row.classList.add('active');
+}
+async function pickerOpen(title,cb,start){
+  pickerCb=cb;pickerTarget=start||'';pickerIdx={};
+  $('pickerTitle').textContent=title;$('pickerPath').textContent=pickerTarget||'/';
+  const box=$('pickerTree');box.innerHTML='';box.appendChild(pickerNode('','🏠 根目录'));
+  $('pickerModal').classList.add('show');
+  const n=pickerIdx[''];if(n)await treeEnsure(n.kids,n.tog,'',pickerNode);
+  if(pickerTarget&&pickerIdx[pickerTarget])pickerPick(pickerTarget,pickerIdx[pickerTarget].row);
+}
+function pickerOk(){closeModal('pickerModal');const cb=pickerCb;pickerCb=null;if(cb)cb(pickerTarget)}
+
+let renameTarget=null;
+function showRename(it){if(!it)return;renameTarget=it;$('renameInput').value=it.name;
+  $('renameModal').classList.add('show');
+  setTimeout(()=>{const i=$('renameInput');i.focus();const dot=it.is_dir?-1:it.name.lastIndexOf('.');
+    i.setSelectionRange(0,dot>0?dot:it.name.length)},60)}
+async function doRename(){
+  const nn=$('renameInput').value.trim();
+  if(!renameTarget||!nn){toast('请输入新名称','error');return}
+  try{const r=await fretry('/api/rename',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({path:renameTarget.path,name:nn})});
+    const d=await r.json();
+    if(d.success){closeModal('renameModal');toast('已重命名为 '+nn,'success');
+      const it=renameTarget;renameTarget=null;await load(currentPath,false);
+      if(it.is_dir){treeInit()}}
+    else toast(d.error||'重命名失败','error')
+  }catch(e){toast(e.message,'error')}
+}
+
+let me={name:'',admin:true,root:''};
+async function loadMe(){try{const r=await fretry('/api/me');const d=await r.json();
+  if(d.success){me=d;const b=$('userName');if(b)b.textContent=d.name;const t=$('userTag');if(t)t.textContent=d.admin?'超级用户':'普通用户';applyRole()}}catch(e){}}
+function applyRole(){
+  if(me.admin)return;
+  ['btnProcess','btnTerminal'].forEach(id=>{const b=$(id);if(b)b.style.display='none'});
+  const rb=document.querySelector('.root-btn');if(rb)rb.style.display='none';
+  ['terminalPanel','processPanel'].forEach(id=>{const e=$(id);if(e)e.style.display='none'});
+}
+function openUserModal(){$('userModal').classList.add('show');
+  $('pwName').value=me.name;
+  $('userAdminBox').style.display=me.admin?'':'none';
+  if(me.admin)loadUsers();}
+async function loadUsers(){try{const r=await fretry('/api/users');const d=await r.json();
+  if(!d.success){toast(d.error||'加载失败','error');return}
+  $('userFile').textContent=d.file||'';
+  let h='';d.users.forEach(u=>{h+=`<div class="user-row"><span class="uname">${esc(u.name)}${u.admin?'（超级用户）':''}</span>`+
+    `<span class="uroot" title="${esc(u.root||'')}">${esc(u.root||'')}</span>`+
+    `<button class="mini" onclick="fillPw('${esc(u.name)}')">改密码</button>`+
+    (u.admin?'':`<button class="mini danger" onclick="delUser('${esc(u.name)}')">删除</button>`)+`</div>`});
+  $('userList').innerHTML=h||'<div class="tree-empty">暂无普通用户</div>';}catch(e){}}
+function fillPw(n){$('pwName').value=n;$('pwOld').value='';$('pwNew').value='';$('pwNew').focus()}
+async function addUser(){
+  const n=$('newUserName').value.trim(),p=$('newUserPass').value,r=$('newUserRoot').value.trim();
+  if(!n||!p){toast('用户名和密码不能为空','error');return}
+  try{const rs=await fretry('/api/users',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({name:n,password:p,root:r})});
+    const d=await rs.json();
+    if(d.success){toast('已添加用户 '+n,'success');$('newUserName').value='';$('newUserPass').value='';$('newUserRoot').value='';loadUsers()}
+    else toast(d.error||'添加失败','error')}catch(e){toast(e.message,'error')}}
+async function delUser(n){if(!confirm('确定删除用户 '+n+' ？该用户将无法再登录。'))return;
+  try{const r=await fretry('/api/users',{method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:n})});
+    const d=await r.json();if(d.success){toast('已删除 '+n,'success');loadUsers()}else toast(d.error||'删除失败','error')}catch(e){toast(e.message,'error')}}
+async function doPasswd(){
+  const n=$('pwName').value.trim()||me.name,o=$('pwOld').value,np=$('pwNew').value;
+  if(!np){toast('请输入新密码','error');return}
+  try{const r=await fretry('/api/passwd',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({name:n,old_password:o,new_password:np})});
+    const d=await r.json();
+    if(d.success){toast('密码已修改','success');$('pwOld').value='';$('pwNew').value='';$('pwName').value=me.name}
+    else toast(d.error||'修改失败','error')}catch(e){toast(e.message,'error')}}
+function pickUserRoot(){pickerOpen('选择该用户的根目录',rel=>{
+  $('newUserRoot').value=rel?(currentRoot.replace(/[\\/]+$/,'')+'/'+rel):currentRoot;},'')}
+
+(async()=>{await loadMe();await loadInitRoot();loadFtpInfo();await treeInit();load('');if(me.admin)initTerm()})();
 </script></body></html>'''
 
 
@@ -1397,6 +1714,8 @@ def idx(): return render_template_string(TPL, chunk_size=CHUNK_SIZE, ROOT_DIR=ge
 
 @app.route('/api/ftp/info')
 def api_ftp_info():
+    r = _admin_only()
+    if r: return r
     return jsonify({
         'success': True,
         'enabled': FTP_AVAILABLE,
@@ -1414,10 +1733,129 @@ def api_get_root(): return jsonify({'success':True,'root':get_root()})
 
 @app.route('/api/set_root', methods=['POST'])
 def api_set_root():
+    r = _admin_only()
+    if r: return r
     p = (request.get_json() or {}).get('path','').strip()
     if not p: return jsonify({'success':False,'error':'路径为空'})
     ok, r = set_root(p)
     return jsonify({'success':True,'root':r}) if ok else jsonify({'success':False,'error':r})
+
+
+@app.route('/api/me')
+def api_me():
+    u = current_user()
+    return jsonify({'success': True, 'name': u['name'], 'admin': u['admin'], 'root': u['root']})
+
+
+@app.route('/api/rename', methods=['POST'])
+def api_rename():
+    d = request.get_json() or {}
+    p, nn = d.get('path', ''), (d.get('name') or '').strip()
+    if not p or not nn: return jsonify({'success': False, 'error': '参数缺失'})
+    if '/' in nn or '\\' in nn or nn in ('.', '..'):
+        return jsonify({'success': False, 'error': '名称不能包含路径分隔符'})
+    root = os.path.abspath(get_root())
+    src = abspath(p)
+    if os.path.normcase(src) == os.path.normcase(root):
+        return jsonify({'success': False, 'error': '不能重命名根目录'})
+    if not os.path.exists(src):
+        return jsonify({'success': False, 'error': '文件不存在'})
+    dst = os.path.join(os.path.dirname(src), nn)
+    if not _inside(dst, root):
+        return jsonify({'success': False, 'error': '目标越出根目录'})
+    if os.path.exists(dst) and os.path.normcase(dst) != os.path.normcase(src):
+        return jsonify({'success': False, 'error': '同名文件已存在'})
+    try:
+        os.rename(src, dst)
+        return jsonify({'success': True, 'name': nn,
+                        'path': os.path.relpath(dst, root).replace(os.sep, '/')})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+
+@app.route('/api/tree')
+def api_tree():
+    p = request.args.get('path', '')
+    ap, root = abspath(p), os.path.abspath(get_root())
+    if not os.path.isdir(ap):
+        return jsonify({'success': False, 'error': '不是目录', 'dirs': []})
+    dirs = []
+    try:
+        for n in sorted(os.listdir(ap), key=lambda s: s.lower()):
+            fp = os.path.join(ap, n)
+            try:
+                if os.path.isdir(fp):
+                    dirs.append({'name': n, 'path': os.path.relpath(fp, root).replace(os.sep, '/')})
+            except OSError:
+                continue
+    except OSError as e:
+        return jsonify({'success': False, 'error': str(e), 'dirs': []})
+    return jsonify({'success': True, 'dirs': dirs[:500]})
+
+
+@app.route('/api/users', methods=['GET', 'POST', 'DELETE'])
+def api_users():
+    r = _admin_only()
+    if r: return r
+    d = request.get_json(silent=True) or {}
+    if request.method == 'GET':
+        out = [{'name': _auth['user'], 'admin': True, 'root': _cfg['root']}]
+        for n, rec in sorted(_users.items()):
+            if n == _auth['user']: continue
+            out.append({'name': n, 'admin': False, 'root': rec.get('root', '')})
+        return jsonify({'success': True, 'users': out, 'file': USERS_FILE})
+    name = (d.get('name') or '').strip()
+    if request.method == 'DELETE':
+        if not name or name == _auth['user']:
+            return jsonify({'success': False, 'error': '不能删除超级用户'})
+        if name not in _users:
+            return jsonify({'success': False, 'error': '用户不存在'})
+        _users.pop(name, None)
+        return jsonify({'success': True}) if save_users() else jsonify({'success': False, 'error': '保存失败'})
+    pw = d.get('password') or ''
+    root = (d.get('root') or '').strip()
+    if not name or not pw:
+        return jsonify({'success': False, 'error': '用户名和密码不能为空'})
+    if '/' in name or '\\' in name or name == _auth['user']:
+        return jsonify({'success': False, 'error': '用户名不可用'})
+    if len(pw) < 4:
+        return jsonify({'success': False, 'error': '密码至少 4 位'})
+    if root:
+        root = os.path.abspath(root)
+        if not os.path.isdir(root):
+            return jsonify({'success': False, 'error': '根目录不存在'})
+    else:
+        root = os.path.join(_cfg['root'], name)
+        try: os.makedirs(root, exist_ok=True)
+        except OSError as e: return jsonify({'success': False, 'error': f'根目录创建失败: {e}'})
+    salt, h = _pw_hash(pw)
+    _users[name] = {'salt': salt, 'hash': h, 'admin': False, 'root': root}
+    if not save_users():
+        return jsonify({'success': False, 'error': '保存失败，请检查程序目录写入权限'})
+    return jsonify({'success': True, 'root': root})
+
+
+@app.route('/api/passwd', methods=['POST'])
+def api_passwd():
+    d = request.get_json() or {}
+    me = current_user()
+    name = (d.get('name') or me['name']).strip()
+    old, new = d.get('old_password') or '', d.get('new_password') or ''
+    if not new: return jsonify({'success': False, 'error': '新密码不能为空'})
+    if len(new) < 4: return jsonify({'success': False, 'error': '新密码至少 4 位'})
+    if name != me['name']:
+        if not me['admin']:
+            return jsonify({'success': False, 'error': '需要超级用户权限'})
+    elif not _verify(me['name'], old):
+        return jsonify({'success': False, 'error': '原密码不正确'})
+    salt, h = _pw_hash(new)
+    rec = _users.get(name) or {}
+    _users[name] = {'salt': salt, 'hash': h,
+                    'admin': bool(name == _auth['user'] or rec.get('admin')),
+                    'root': rec.get('root', '')}
+    if not save_users():
+        return jsonify({'success': False, 'error': '保存失败，请检查程序目录写入权限'})
+    return jsonify({'success': True})
 
 
 @app.route('/api/list')
@@ -1462,7 +1900,8 @@ def api_batch_async():
     paths, target, op = d.get('paths',[]), d.get('target',''), d.get('operation','copy')
     if not paths: return jsonify({'success':False,'error':'未选择'})
     tid = str(uuid.uuid4())[:12]
-    t = threading.Thread(target=bg_batch_task, args=(tid, paths, target, op), daemon=True)
+    t = threading.Thread(target=bg_batch_task,
+                         args=(tid, paths, target, op, os.path.abspath(get_root())), daemon=True)
     t.start()
     return jsonify({'success':True,'task_id':tid})
 
@@ -1628,6 +2067,8 @@ def api_plat():
 
 @app.route('/api/terminal/exec', methods=['POST'])
 def api_term_exec():
+    r = _admin_only()
+    if r: return r
     d = request.get_json() or {}
     cmd, cwd = (d.get('command') or '').strip(), d.get('cwd','')
     if not cmd: return jsonify({'success':False,'error':'命令为空'})
@@ -1673,6 +2114,8 @@ def _run_cmd(jid, cmd, cwd):
 
 @app.route('/api/terminal/stream/<jid>')
 def api_term_stream(jid):
+    r = _admin_only()
+    if r: return r
     if jid not in out_qs: return jsonify({'error':'任务不存在'}), 404
     q = out_qs[jid]
     def gen():
@@ -1688,6 +2131,8 @@ def api_term_stream(jid):
 
 @app.route('/api/terminal/kill/<jid>', methods=['POST'])
 def api_term_kill(jid):
+    r = _admin_only()
+    if r: return r
     proc = act_procs.get(jid)
     if not proc: return jsonify({'success':False,'error':'进程不存在'})
     try:
@@ -1699,12 +2144,16 @@ def api_term_kill(jid):
 
 @app.route('/api/terminal/history')
 def api_term_hist():
+    r = _admin_only()
+    if r: return r
     lim = int(request.args.get('limit', 50))
     return jsonify({'success':True,'history':cmd_hist[-lim:][::-1]})
 
 
 @app.route('/api/terminal/completions')
 def api_term_comp():
+    r = _admin_only()
+    if r: return r
     partial, cwd = request.args.get('partial','').strip(), request.args.get('cwd','')
     if not partial: return jsonify({'success':True,'completions':sorted(CMDS)})
     parts = partial.split(); comps = []
@@ -1732,12 +2181,16 @@ def api_term_comp():
 
 @app.route('/api/terminal/clear_history', methods=['POST'])
 def api_term_clhist():
+    r = _admin_only()
+    if r: return r
     cmd_hist.clear(); return jsonify({'success':True})
 
 
 # ================= 进程 API =================
 @app.route('/api/process/list')
 def api_proc_list():
+    r = _admin_only()
+    if r: return r
     force = request.args.get('force') == '1'
     d, err = get_procs(force)
     if d is None: return jsonify({'success':False,'error':err or '获取失败','processes':[],'system':{}})
@@ -1746,6 +2199,8 @@ def api_proc_list():
 
 @app.route('/api/process/kill', methods=['POST'])
 def api_proc_kill():
+    r = _admin_only()
+    if r: return r
     pid = (request.get_json() or {}).get('pid')
     if not pid: return jsonify({'success':False,'error':'缺少 PID'})
     try:

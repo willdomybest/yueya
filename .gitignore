@@ -8,6 +8,10 @@ venv/
 Thumbs.db
 *.log
 
+# 运行时数据（用户与密码）
+users.json
+.remotefm/
+
 # 打包产物
 build/
 dist/
