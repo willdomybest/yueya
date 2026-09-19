@@ -98,6 +98,18 @@ SD_ROOT=/home/me/share SD_USER=me SD_PASS='换成强密码' SD_PORT=8899 SD_FTP=
 | `SD_FTP_PASSIVE_START` | `60000` | 被动端口起始值（连续 50 个） |
 | `SD_SECRET` | 每次启动随机 | 会话密钥，固定它可让登录状态在重启后保持 |
 
+## 打包成可执行文件
+
+```bash
+python build_exe.py
+```
+
+产物在 `dist/`：可执行文件 + `LICENSE` + `THIRD_PARTY_NOTICES.txt` + `licenses/`（各依赖的许可证全文）。
+首次运行会自动安装 PyInstaller；图标由脚本内联生成，不需要额外的资源文件。
+
+**运行程序本身只需要 `RemoteFM.py` 一个文件**，`build_exe.py` 只在打包时使用。
+发布二进制时请把这几项一起打包：BSD / Apache-2.0 / MPL-2.0 都要求随二进制保留版权与许可声明。
+
 ## 安全
 
 **登录密码等于这台电脑的控制权**：它能读写文件、删除文件、执行命令。
