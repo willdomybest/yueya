@@ -2,19 +2,27 @@
 
 [中文](README.md) | **English**
 
-**One Python file that turns any computer into a file manager in your browser.**
+**One Python file that safely turns any computer into a file manager in your browser.**
+
+## Who it is for
+
+- Turn your home computer into a **private cloud drive** — reach it any time on your LAN or VPN;
+- Give **a headless server, Raspberry Pi or NAS** a graphical interface without fighting Samba;
+- Manage your computer **from your phone** — transfer photos, watch videos, from bed;
+- **Hand a file to a colleague**: send a link or open FTP, zero install on their side.
 
 ## Quick start
 
 ```bash
-pip install flask requests pyftpdlib && python RemoteFM.py
+pip install flask requests pyftpdlib
+python RemoteFM.py
 ```
 
 Then open <http://127.0.0.1:8880> and log in with `admin / admin123`.
 
 - Skip `pyftpdlib` if you don't need FTP; the app simply disables it.
 - With [uv](https://docs.astral.sh/uv/) installed, one line is enough: `uv run RemoteFM.py`.
-- To reach it from your phone, use `http://<your-lan-ip>:8880` and allow it through the firewall.
+- To reach it from your phone or another machine, use `http://<your-lan-ip>:8880` and allow it through the firewall on first run.
 
 ## You have probably been here
 
@@ -22,7 +30,7 @@ You want a photo from your PC on your phone — the chat app re-compresses it fi
 
 All you wanted was your own file. Somehow it still has to pass through somebody else's server.
 
-**RemoteFM skips all of that: no account, no cloud, no middleman — just a door opened on your own machine.**
+**RemoteFM skips all of that: no account, no cloud upload — it just opens a door on your own machine.**
 
 ![Interface](screenshots/file-manager.png)
 
@@ -45,13 +53,6 @@ Open a browser and you are looking at that computer's files. Upload, download, p
 | 💻 **Terminal** | Live command output, history, Tab completion, background jobs; the working directory follows the folder you are browsing |
 | ⚙️ **Processes** | CPU and memory usage plus full command lines; kill a stuck process in one click |
 
-## Who it is for
-
-- Turn your home computer into a **private cloud drive** on your LAN or VPN;
-- Give **a headless server, Raspberry Pi or NAS** a graphical interface without fighting Samba;
-- Manage your computer **from your phone** — transfer photos, watch videos, from bed;
-- **Hand a file to a colleague**: send a link or open FTP, zero install on their side.
-
 ## One line before you start
 
 The login password equals full control of that machine — **change the default password, keep it on a LAN or VPN, never expose it directly to the internet.** Details in the Security section below.
@@ -70,47 +71,9 @@ The login password equals full control of that machine — **change the default 
 
 Tested with: Windows 11 + Python 3.12.10 + Flask 3.1.3 + Werkzeug 3.1.8 + requests 2.34.2 + pyftpdlib 2.2.0.
 
-## Features
-
-### File management
-
-Browse, search, sort, multi-select, copy / move / delete, create folders, ZIP compress and
-extract, and switch the root directory at any time.
-
-![File manager](screenshots/file-manager.png)
-
-### Upload and transfer
-
-32MB chunked uploads with resume, in-browser preview for images / video / text, and a
-"download from URL" button that lets the server fetch a file for you.
-
-![Upload](screenshots/upload.png)
-
-### FTP
-
-Shares the same account and root directory with the web UI. Copy the link into Explorer or
-FileZilla — handy for very large files.
-
-![FTP](screenshots/ftp.png)
-
-### Web terminal
-
-Run commands with live output, command history, Tab completion and background jobs. The
-working directory follows the folder you are browsing.
-
-![Terminal](screenshots/terminal.png)
-
-### Processes
-
-See processes, CPU and memory usage and full command lines; search by name, PID or command,
-and kill a process in one click.
-
-![Processes](screenshots/processes.png)
-
 ## Configuration
 
-Everything is configured through environment variables — no config file, changes take effect
-immediately.
+Everything is configured through environment variables — no config file, changes take effect immediately.
 
 Windows (PowerShell):
 
@@ -147,6 +110,38 @@ delete files and execute commands.
 The app collects nothing, has no telemetry, and only writes chunk files to the system temp
 directory. Use it only on machines you own or are authorized to manage. The software is
 provided "as is" under the MIT license, without warranty of any kind.
+
+## Features
+
+### File management
+
+Browse, search, sort, multi-select; copy / move / delete / create folders; ZIP compress and extract; switch the root directory anytime.
+
+![File manager](screenshots/file-manager.png)
+
+### Upload and transfer
+
+32MB chunked uploads with resume, in-browser preview for images / video / text, and a URL box that lets the server download the file for you.
+
+![Upload](screenshots/upload.png)
+
+### FTP
+
+Shares the account and root directory with the web UI — paste the link into Explorer or FileZilla; made for very large files.
+
+![FTP](screenshots/ftp.png)
+
+### Web terminal
+
+Run commands with live output, command history, Tab completion and background jobs; the working directory follows the folder you are browsing.
+
+![Terminal](screenshots/terminal.png)
+
+### Processes
+
+See processes, CPU and memory usage and full command lines; search by name, PID or command, and kill a process in one click.
+
+![Processes](screenshots/processes.png)
 
 ## License
 
