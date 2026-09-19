@@ -15,7 +15,7 @@
 
 ### Option 1: download the portable build (Windows, no Python needed)
 
-Grab `RemoteFM-v1.3.0-windows-x64.zip` from the [releases page](https://github.com/willdomybest/yueya/releases/latest),
+Grab `RemoteFM-v1.4.0-windows-x64.zip` from the [releases page](https://github.com/willdomybest/yueya/releases/latest),
 unzip it and double-click `RemoteFM.exe` — **no Python, no dependencies, no installer**, it just runs.
 
 > In China you can also download from [Gitee Releases](https://gitee.com/willdomybest/yueya/releases/latest).
@@ -183,6 +183,31 @@ Shares the account and root directory with the web UI — paste the link into Ex
 Run commands with live output, command history, Tab completion and background jobs; the working directory follows the folder you are browsing.
 
 ![Terminal](screenshots/terminal.png)
+
+### Remote command API (token)
+
+The 🔑 button in the terminal header opens it: a **status switch** in the top-right generates the token, and the
+token row ends with the switch plus three small icon buttons — 👁 show, 📋 copy, 🔄 refresh (hidden by default).
+
+```bash
+# GET (quickest — escape spaces as %20 or +)
+curl "http://<your-ip>:8880/api/terminal/exec_token?token=<TOKEN>&cmd=dir"
+
+# POST JSON (recommended — the command stays out of the URL)
+curl -X POST "http://<your-ip>:8880/api/terminal/exec_token" \
+  -H "X-Token: <TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"cmd":"dir","cwd":".","timeout":30}'
+```
+
+The response is `{"success":true,"exit_code":0,"duration":0.05,"cwd":"...","output":"..."}`; a wrong token or a
+disabled API returns 401. The panel keeps the **last 48 hours** of requests (time / source / command / exit code /
+duration) and refreshes every 5 seconds.
+
+**Secrets on disk are encrypted**: the token is stored symmetrically (HMAC-SHA256 keystream + encrypt-then-MAC), so
+the file only holds `nonce + ciphertext + MAC`. It is decrypted on start, so the token stays visible and keeps
+working after a restart. The key comes from `SD_SECRET` when set (recommended — nothing on disk), otherwise a
+`key.bin` with mode 600 is generated next to the data. User passwords stay one-way hashed and are never displayed.
 
 ### Processes
 

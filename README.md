@@ -123,7 +123,9 @@ SD_ROOT=/home/me/share SD_USER=me SD_PASS='换成强密码' SD_PORT=8899 SD_FTP=
 | `SD_HOST` / `SD_PORT` | `0.0.0.0` / `8880` | 监听地址与网页端口 |
 | `SD_FTP` / `SD_FTP_PORT` | `1`（启用）/ `2121` | FTP 开关与端口，被动端口 60000-60049 |
 | `SD_FTP_PASSIVE_START` | `60000` | 被动端口起始值（连续 50 个） |
-| `SD_SECRET` | 每次启动随机 | 会话密钥，固定它可让登录状态在重启后保持 |
+| `SD_SECRET` | 每次启动随机 | 会话密钥，固定它可让登录状态在重启后保持；同时作为落盘加密密钥 |
+| `SD_TOKEN_FILE` | 与 `users.json` 同目录的 `token.json` | 远程命令接口的 Token 存储位置 |
+| `SD_KEY_FILE` | 与 `users.json` 同目录的 `key.bin` | 落盘加密密钥文件；设置了 `SD_SECRET` 时改由它派生 |
 
 ## 打包成可执行文件
 
@@ -175,6 +177,29 @@ python build_exe.py
 执行命令并实时回显，支持命令历史、Tab 补全、后台任务，工作目录跟随当前浏览的文件夹。
 
 ![终端](screenshots/terminal.png)
+
+### 远程命令接口（Token）
+
+终端面板右上角的 🔑 打开「远程命令接口」：右上角是一个**状态开关**，打开即生成 Token；
+Token 行右端右对齐地放着开关，旁边是三个小图标 —— 👁 显示 / 📋 复制 / 🔄 刷新（默认隐藏明文）。
+
+```bash
+# GET（最省事；命令里的空格要写成 %20 或 +）
+curl "http://<你的IP>:8880/api/terminal/exec_token?token=<TOKEN>&cmd=dir"
+
+# POST JSON（推荐，命令不落在 URL 里）
+curl -X POST "http://<你的IP>:8880/api/terminal/exec_token" \
+  -H "X-Token: <TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"cmd":"dir","cwd":".","timeout":30}'
+```
+
+返回 `{"success":true,"exit_code":0,"duration":0.05,"cwd":"...","output":"..."}`；Token 错误或接口停用时返回 401。
+面板右侧保留**最近 48 小时**的请求记录（时间 / 来源 / 命令 / 退出码 / 耗时），每 5 秒自动刷新。
+
+**落盘的敏感信息是加密的**：Token 采用对称加密（HMAC-SHA256 密钥流 + encrypt-then-MAC），磁盘上只有
+`nonce + 密文 + MAC`，重启后自动解密回显，Token 和功能都继续有效。密钥优先取 `SD_SECRET`（推荐，这样密钥不落盘），
+否则在程序目录生成权限 600 的 `key.bin`。用户密码则是单向哈希，不回显。
 
 ### 进程管理
 

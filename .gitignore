@@ -10,6 +10,8 @@ Thumbs.db
 
 # 运行时数据（用户与密码）
 users.json
+token.json
+key.bin
 .remotefm/
 
 # 打包产物

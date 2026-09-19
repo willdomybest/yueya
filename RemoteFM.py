@@ -15,7 +15,7 @@ RemoteFM —— 单文件远程文件管理器（网页文件管理 + FTP + 网�
 # requires-python = ">=3.8"
 # dependencies = ["flask>=2.0", "requests>=2.25", "pyftpdlib>=1.5.7"]
 # ///
-import os, sys, time, shutil, zipfile, json, uuid, threading, logging, tempfile, subprocess, signal, queue, re, shlex, socket, hashlib, platform as sysplat
+import os, sys, time, hmac, shutil, zipfile, json, uuid, threading, logging, tempfile, subprocess, signal, queue, re, shlex, socket, hashlib, platform as sysplat
 from urllib.parse import urlparse, unquote
 from flask import Flask, request, send_file, render_template_string, jsonify, Response, stream_with_context, abort, session, redirect
 from werkzeug.utils import secure_filename
@@ -108,6 +108,8 @@ def _pick_users_file():
 
 
 USERS_FILE = _pick_users_file()
+TOKEN_FILE = os.environ.get('SD_TOKEN_FILE', '').strip() or os.path.join(os.path.dirname(USERS_FILE), 'token.json')
+KEY_FILE = os.environ.get('SD_KEY_FILE', '').strip() or os.path.join(os.path.dirname(USERS_FILE), 'key.bin')
 _users_lock = threading.Lock()
 _users = {}          # name -> {'salt','hash','admin','root'}
 
@@ -115,6 +117,70 @@ _users = {}          # name -> {'salt','hash','admin','root'}
 def _pw_hash(pw, salt=None):
     salt = salt or os.urandom(8).hex()
     return salt, hashlib.sha256((salt + pw).encode('utf-8')).hexdigest()
+
+
+# ================= 落盘敏感信息的对称加密 =================
+# 密钥优先取 SD_SECRET / SD_KEY；否则在程序目录生成 key.bin（32 字节随机，权限 600）。
+# 算法：HMAC-SHA256 作为 PRF 生成密钥流（CTR 结构）异或明文，再做 encrypt-then-MAC 校验。
+def _load_key():
+    env = (os.environ.get('SD_SECRET') or os.environ.get('SD_KEY') or '').strip()
+    if env:
+        return hashlib.sha256(('remotefm-key:' + env).encode('utf-8')).digest()
+    try:
+        with open(KEY_FILE, 'rb') as f:
+            k = f.read()
+        if len(k) >= 32:
+            return k[:32]
+    except OSError:
+        pass
+    k = os.urandom(32)
+    try:
+        os.makedirs(os.path.dirname(KEY_FILE) or '.', exist_ok=True)
+        with open(KEY_FILE, 'wb') as f:
+            f.write(k)
+        try:
+            os.chmod(KEY_FILE, 0o600)
+        except OSError:
+            pass
+    except OSError as e:
+        logging.warning('密钥文件写入失败，本次启动的加密信息重启后无法解密: %s', e)
+    return k
+
+
+KEY = _load_key()
+
+
+def _keystream(nonce, size):
+    out = bytearray()
+    for i in range(0, size, 32):
+        out += hmac.new(KEY, nonce + i.to_bytes(8, 'big'), hashlib.sha256).digest()
+    return bytes(out[:size])
+
+
+def encrypt_secret(text):
+    data = str(text).encode('utf-8')
+    nonce = os.urandom(16)
+    ct = bytes(a ^ b for a, b in zip(data, _keystream(nonce, len(data))))
+    mac = hmac.new(KEY, nonce + ct, hashlib.sha256).hexdigest()
+    return {'v': 1, 'nonce': nonce.hex(), 'ct': ct.hex(), 'mac': mac}
+
+
+def decrypt_secret(d):
+    """解密失败（例如换了 SD_SECRET）返回 None。"""
+    if not isinstance(d, dict):
+        return None
+    try:
+        nonce = bytes.fromhex(d.get('nonce') or '')
+        ct = bytes.fromhex(d.get('ct') or '')
+    except ValueError:
+        return None
+    if not nonce or not hmac.compare_digest(
+            hmac.new(KEY, nonce + ct, hashlib.sha256).hexdigest(), d.get('mac') or ''):
+        return None
+    try:
+        return bytes(a ^ b for a, b in zip(ct, _keystream(nonce, len(ct)))).decode('utf-8')
+    except UnicodeDecodeError:
+        return None
 
 
 def load_users():
@@ -252,7 +318,8 @@ def _check_auth(u, p):
 
 
 def _need_login():
-    if request.path in ('/login', '/favicon.ico', '/favicon.svg'):
+    if request.path in ('/login', '/favicon.ico', '/favicon.svg', '/api/terminal/exec_token'):
+        # exec_token 用 Token 自证身份，不走登录会话
         return False
     if session.get('logged_in'):
         if not session_user_valid():       # 账号被删除或改名后，旧会话立即失效
@@ -911,6 +978,40 @@ table.user-table button.mini.danger{color:#e74c3c;border-color:#fdd6d6}
 .user-side.show{display:block}
 .user-side h4{margin:0 0 12px;font-size:14px;color:#2c3e50}
 .user-footer{height:28px;background:#fafbfc;border-top:1px solid #ebedf1;display:flex;align-items:center;padding:0 16px;font-size:12px;color:#7a8299;flex-shrink:0}
+.token-panel{position:fixed;inset:0;background:#f5f6fa;z-index:3500;display:none;flex-direction:column}
+.token-panel.show{display:flex}
+.token-body{flex:1;display:flex;min-height:0}
+.token-left{width:430px;flex-shrink:0;border-right:1px solid #e6e8ec;background:#fff;padding:16px;overflow:auto}
+.token-right{flex:1;overflow:auto;background:#fff}
+.token-value{font-family:Consolas,monospace;font-size:12.5px;background:#f4f6fa;border:1px solid #e6e8ec;border-radius:7px;padding:10px;word-break:break-all;color:#2c3e50}
+.code-block{font-family:Consolas,monospace;font-size:12px;background:#1e1e2e;color:#4af7a0;border-radius:7px;padding:10px;white-space:pre-wrap;word-break:break-all;line-height:1.6}
+table.req-table{width:100%;border-collapse:collapse;font-size:12.5px}
+table.req-table th{position:sticky;top:0;background:#fafbfc;color:#7a8299;font-size:12px;font-weight:600;text-align:left;padding:9px 12px;border-bottom:1px solid #ebedf1}
+table.req-table td{padding:8px 12px;border-bottom:1px solid #f2f4f8;color:#4a5568}
+table.req-table td.cmd{font-family:Consolas,monospace;max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.badge-ok{color:#27ae60;font-weight:600}
+.badge-err{color:#e74c3c;font-weight:600}
+.switch-wrap{display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;user-select:none;background:rgba(255,255,255,.12);padding:4px 12px;border-radius:6px}
+.switch{width:38px;height:20px;border-radius:10px;background:rgba(255,255,255,.35);position:relative;transition:.2s;flex-shrink:0}
+.switch.on{background:#4af7a0}
+.switch .knob{position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;transition:.2s}
+.switch.on .knob{left:20px}
+.token-left{padding:12px}
+.token-left .side-section{margin-bottom:12px}
+.token-left .field-lbl{margin-bottom:5px}
+.token-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}
+.token-row{display:flex;align-items:center;gap:6px}
+.token-row .token-value{flex:1;min-width:0;padding:8px 10px}
+.switch-wrap.light{background:#f4f6fa;color:#4a5568;padding:3px 8px;gap:6px}
+.switch-wrap.light .switch{width:32px;height:18px;background:#dfe3eb}
+.switch-wrap.light .switch.on{background:#27ae60}
+.switch-wrap.light .switch .knob{width:14px;height:14px;top:2px;left:2px}
+.switch-wrap.light .switch.on .knob{left:16px}
+.switch-text{font-size:12px;color:#7a8299}
+.icon-btn{width:27px;height:27px;border:1px solid #dfe3eb;background:#fff;border-radius:6px;cursor:pointer;font-size:13px;line-height:1;padding:0;color:#4a5568}
+.icon-btn:hover{background:#f5f7fb}
+.code-block{padding:8px 10px;font-size:11.5px;line-height:1.55}
+.side-lead{margin:-4px 0 12px}
 .user-side .side-lead{margin:-6px 0 16px;font-size:12px;color:#9aa3b5;line-height:1.6}
 .field-lbl{display:block;font-size:12.5px;font-weight:600;color:#4a5568;margin-bottom:6px}
 .side-input{width:100%;padding:9px 11px;border:1px solid #dfe3eb;border-radius:7px;font-size:13.5px;font-family:inherit;outline:0;transition:.15s;background:#fff}
@@ -1151,7 +1252,7 @@ table.process-table tbody tr:hover .process-actions{opacity:1}
 <!-- 终端面板：现在位于 .app 内部，是 flex 布局的一部分 -->
 <div class="terminal-panel collapsed" id="terminalPanel">
 <div class="terminal-header" onclick="toggleTerminal(event)"><span class="terminal-title"><span>💻</span><span>远程命令</span><span class="terminal-platform" id="terminalPlatform">—</span><span class="terminal-cwd" id="terminalCwdDisplay">—</span></span>
-<div class="terminal-header-actions" onclick="event.stopPropagation()"><button class="term-btn" onclick="clearTerminal()">🗑️</button><button class="term-btn" onclick="killTerminalProcess()" id="btnKillProc" style="display:none">⏹</button><span class="toggle-icon">▲</span></div></div>
+<div class="terminal-header-actions" onclick="event.stopPropagation()"><button class="term-btn" onclick="openTokenPanel()" title="远程命令接口（Token）">🔑</button><button class="term-btn" onclick="clearTerminal()">🗑️</button><button class="term-btn" onclick="killTerminalProcess()" id="btnKillProc" style="display:none">⏹</button><span class="toggle-icon">▲</span></div></div>
 <div class="terminal-body">
 <div class="terminal-history"><div class="history-header"><span>历史记录</span><span class="history-clear" onclick="clearHistory()">清空</span></div><div class="history-list" id="historyList"></div></div>
 <div class="terminal-main"><div class="terminal-output" id="terminalOutput"></div>
@@ -1194,6 +1295,21 @@ table.process-table tbody tr:hover .process-actions{opacity:1}
 <div class="modal-bg" id="renameModal"><div class="modal"><h3>重命名</h3><div class="form-row"><label>新名称</label><input type="text" id="renameInput" onkeydown="if(event.key==='Enter')doRename()"><div class="hint">只改名称，不能输入路径分隔符</div></div><div class="actions"><button onclick="closeModal('renameModal')">取消</button><button class="primary" onclick="doRename()">确定</button></div></div></div>
 
 <div class="modal-bg" id="pickerModal"><div class="modal" style="max-width:560px"><h3 id="pickerTitle">选择目标目录</h3><div class="picker-path" id="pickerPath">/</div><div class="picker-box" id="pickerTree"></div><div class="picker-count" id="pickerCount" style="display:none"></div><div class="actions"><button onclick="closeModal('pickerModal')">取消</button><button class="primary" id="pickerOkBtn" onclick="pickerOk()">选择此目录</button></div></div></div>
+
+<div class="token-panel" id="tokenPanel">
+<div class="user-topbar">
+<div class="u-title">🔑 远程命令接口</div>
+<div class="u-stats" id="tokenStats"></div>
+<button onclick="closeTokenPanel()">✕ 关闭</button>
+</div>
+<div class="token-body">
+<div class="token-left" id="tokenLeft"></div>
+<div class="token-right"><table class="req-table"><thead><tr>
+<th style="width:150px">时间</th><th style="width:70px">来源</th><th>命令</th><th style="width:70px">退出码</th><th style="width:80px">耗时</th>
+</tr></thead><tbody id="tokenReqs"></tbody></table></div>
+</div>
+<div class="user-footer" id="tokenFooter"></div>
+</div>
 
 <div class="user-panel" id="userPanel">
 <div class="user-topbar">
@@ -1849,6 +1965,74 @@ function applyRole(){
   ['btnUsers'].forEach(id=>{const e=$(id);if(e)e.style.display='none'});   // 用户管理仅超级用户可见
 }
 let userCache=[];
+/* ================= 远程命令接口（Token） ================= */
+let tokenInfo={enabled:false,token:'',url:'',created_str:''},tokenTimer=null,tokenMask=true;
+function maskToken(t){return !t?'—':(tokenMask?t.slice(0,8)+'••••••••'+t.slice(-4):t)}
+function openTokenPanel(){$('tokenPanel').classList.add('show');tokenMask=true;loadToken();
+  if(tokenTimer)clearInterval(tokenTimer);tokenTimer=setInterval(loadToken,5000)}
+function closeTokenPanel(){$('tokenPanel').classList.remove('show');
+  if(tokenTimer){clearInterval(tokenTimer);tokenTimer=null}}
+async function loadToken(){try{const r=await fretry('/api/terminal/token');const d=await r.json();
+  if(!d.success)return;tokenInfo=d;renderToken()}catch(e){}}
+function renderToken(){
+  const on=!!tokenInfo.enabled;
+  $('tokenStats').innerHTML=`<span>记录保留 <b>48</b> 小时</span><span>最近请求 <b>${(tokenInfo.requests||[]).length}</b> 条</span>`;
+  const shown=tokenInfo.token&&tokenInfo.token.length;
+  const tk=shown?tokenInfo.token:'<TOKEN>';
+  const getCmd=`curl "${tokenInfo.url}?token=${tk}&cmd=dir"`;
+  const postCmd=`curl -X POST "${tokenInfo.url}" \\\n  -H "X-Token: ${tk}" \\\n  -H "Content-Type: application/json" \\\n  -d '{"cmd":"dir","cwd":".","timeout":30}'`;
+  $('tokenLeft').innerHTML=
+    `<div class="side-section"><div class="token-head"><label class="field-lbl" style="margin:0">当前 Token</label>`+
+    `<div class="switch-wrap light" onclick="tokenToggle()" title="点击启用或停用接口">`+
+    `<span class="switch-text" id="tokenStateText">${on?'已启用':'未启用'}</span>`+
+    `<span class="switch ${on?'on':''}" id="tokenSwitch"><span class="knob"></span></span></div></div>`+
+    `<div class="token-row"><span class="token-value">${esc(shown?maskToken(tokenInfo.token):(tokenInfo.has_token?'（服务器端已保存，仅哈希）':'（尚未生成）'))}</span>`+
+    `<button class="icon-btn" onclick="toggleTokenMask()" title="${tokenMask?'显示 Token':'隐藏 Token'}">${tokenMask?'👁':'🙈'}</button>`+
+    `<button class="icon-btn" onclick="copyToken()" title="复制 Token">📋</button>`+
+    `<button class="icon-btn" onclick="tokenAction('refresh')" title="刷新 Token">🔄</button></div>`+
+    `<div class="field-hint">${tokenInfo.broken?'检测到本地密钥已变更，旧 Token 无法解密，请点 🔄 重新生成。'
+      :(shown?'创建时间：'+esc(tokenInfo.created_str||'—')+'；Token 以对称加密保存在服务器端，重启后仍可查看；刷新后旧 Token 立即失效。'
+      :(tokenInfo.has_token?'Token 已保存但当前不可读，点 🔄 可重新生成。'
+      :'打开右侧开关即可生成 Token。'))}</div></div>`+
+    `<div class="side-section"><label class="field-lbl">用法一：GET（最简单，适合快速验证）</label>`+
+    `<div class="code-block">${esc(getCmd)}</div>`+
+    `<div class="field-hint">参数：<code>token</code>（必填）、<code>cmd</code>（必填）、<code>cwd</code>（可选，工作目录）、<code>timeout</code>（可选，秒，默认 30，最大 300）。</div></div>`+
+    `<div class="side-section"><label class="field-lbl">用法二：POST JSON（推荐，命令不落在 URL 里）</label>`+
+    `<div class="code-block">${esc(postCmd)}</div>`+
+    `<div class="field-hint">请求头 <code>X-Token</code> 放 Token，Body 为 JSON；把 <code>cmd</code> 换成你要执行的命令即可。</div></div>`+
+    `<div class="side-section"><button class="btn-ghost" onclick="copyCurl()">📋 复制 POST 示例</button>`+
+    `<button class="btn-ghost" onclick="copyGet()" style="margin-left:8px">📋 复制 GET 示例</button></div>`+
+    `<div class="side-section"><label class="field-lbl">返回格式</label>`+
+    `<div class="code-block">${esc('{"success":true,"exit_code":0,"duration":0.05,"cwd":"D:\\\\dir","output":"..."}')}</div>`+
+    `<div class="field-hint">输出最多返回 2 万字符；Token 错误或接口未启用时返回 401。</div></div>`+
+    `<div class="side-section"><label class="field-lbl">安全提醒</label>`+
+    `<div class="field-hint">Token 等同于这台机器的命令执行权限：只在内网或 VPN 内使用，不需要时把开关关掉，怀疑泄露就直接刷新。</div></div>`;
+  const rows=(tokenInfo.requests||[]).map(x=>`<tr><td>${esc(x.time_str)}</td><td>${esc(x.source)}</td>`+
+    `<td class="cmd" title="${esc(x.cmd)}">${esc(x.cmd)}</td>`+
+    `<td class="${x.code===0?'badge-ok':'badge-err'}">${x.code}</td><td>${x.duration}s</td></tr>`).join('');
+  $('tokenReqs').innerHTML=rows||'<tr><td colspan="5" style="color:#b3b9c7">最近 48 小时还没有远程请求</td></tr>';
+  $('tokenFooter').textContent=`请求记录保留最近 48 小时（最多 500 条） · 接口地址 ${tokenInfo.url||''}`;
+}
+function toggleTokenMask(){tokenMask=!tokenMask;renderToken()}
+function copyToken(){tokenInfo.token?copyText(tokenInfo.token,'已复制 Token'):toast('还没有 Token','error')}
+function tokenCmd(kind){const t=tokenInfo.token;if(!t){toast('明文 Token 不可见，请先刷新生成','error');return ''}
+  return kind==='get'?`curl "${tokenInfo.url}?token=${t}&cmd=dir"`
+    :`curl -X POST "${tokenInfo.url}" -H "X-Token: ${t}" -H "Content-Type: application/json" -d '{"cmd":"dir","cwd":".","timeout":30}'`}
+function copyCurl(){const c=tokenCmd('post');if(c)copyText(c,'已复制 POST 示例')}
+function copyGet(){const c=tokenCmd('get');if(c)copyText(c,'已复制 GET 示例')}
+async function tokenToggle(){
+  const act=tokenInfo.enabled?'disable':'enable';
+  await tokenAction(act);
+}
+async function tokenAction(act){
+  try{const r=await fretry('/api/terminal/token',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({action:act})});
+    const d=await r.json();
+    if(d.success){tokenMask=true;   // 默认隐藏，需要时点 👁 查看
+      toast(act==='enable'?'接口已启用':act==='disable'?'接口已停用':'Token 已刷新（点 👁 可查看，或直接 📋 复制）','success');
+      loadToken()}
+    else toast(d.error||'操作失败','error')}catch(e){toast(e.message,'error')}
+}
 let formScope=[];
 function scopeRender(){
   const box=$('scopeList');if(!box)return;
@@ -2431,6 +2615,141 @@ def dl_to_local():
 
 
 # ================= 终端 API =================
+# ---------- 远程命令接口（Token，48 小时请求记录） ----------
+_token = {'enabled': False, 'value': '', 'created': 0, 'salt': '', 'hash': ''}
+REQ_LOG = []
+REQ_LOG_MAX = 500
+REQ_LOG_HOURS = 48
+
+
+def _load_token():
+    global _token
+    _token = {'enabled': False, 'value': '', 'created': 0, 'salt': '', 'hash': '', 'broken': False}
+    try:
+        with open(TOKEN_FILE, encoding='utf-8') as f:
+            d = json.load(f)
+        _token = {'enabled': bool(d.get('enabled')), 'value': '', 'created': d.get('created') or 0,
+                  'salt': d.get('salt') or '', 'hash': d.get('hash') or '', 'broken': False}
+        if d.get('secret'):
+            # 对称加密落盘：重启后仍可解密回显，功能不失效
+            plain = decrypt_secret(d['secret'])
+            if plain:
+                _token['value'] = plain
+            else:
+                _token['broken'] = True     # 换过 SD_SECRET 等导致密钥不一致
+    except (OSError, ValueError):
+        pass
+
+
+def _save_token():
+    try:
+        with open(TOKEN_FILE + '.tmp', 'w', encoding='utf-8') as f:
+            json.dump({'enabled': _token['enabled'], 'created': _token['created'],
+                       'secret': encrypt_secret(_token['value']) if _token['value'] else None}, f)
+        os.replace(TOKEN_FILE + '.tmp', TOKEN_FILE)
+        return True
+    except OSError as e:
+        logging.warning('保存 token 失败: %s', e)
+        return False
+
+
+def _new_token():
+    _token['value'] = 'fm_' + os.urandom(16).hex()
+    _token['salt'], _token['hash'] = '', ''
+    _token['broken'] = False
+    _token['created'] = time.time()
+    return _token['value']
+
+
+def log_request(source, cmd, code, dur, out_len, ip=''):
+    now = time.time()
+    REQ_LOG.append({'time': now, 'time_str': fnow(now), 'source': source, 'ip': ip,
+                    'cmd': cmd, 'code': code, 'duration': round(dur, 2), 'output': out_len})
+    cutoff = now - REQ_LOG_HOURS * 3600
+    while REQ_LOG and REQ_LOG[0]['time'] < cutoff:
+        REQ_LOG.pop(0)
+    if len(REQ_LOG) > REQ_LOG_MAX:
+        del REQ_LOG[:-REQ_LOG_MAX]
+
+
+def token_ok():
+    if not _token['enabled']:
+        return False
+    given = request.headers.get('X-Token') or request.args.get('token') or ''
+    if not given:
+        return False
+    if _token['value']:
+        return hmac.compare_digest(str(given), _token['value'])
+    if _token['salt'] and _token['hash']:      # 兼容旧版哈希记录
+        calc = hashlib.sha256((_token['salt'] + str(given)).encode('utf-8')).hexdigest()
+        return hmac.compare_digest(calc, _token['hash'])
+    return False
+
+
+_load_token()
+
+
+@app.route('/api/terminal/token', methods=['GET', 'POST'])
+def api_term_token():
+    r = _admin_only()
+    if r: return r
+    if request.method == 'POST':
+        act = ((request.get_json(silent=True) or {}).get('action') or '').strip()
+        if act == 'enable':
+            _token['enabled'] = True
+            if not _token['hash']:
+                _new_token()
+        elif act == 'disable':
+            _token['enabled'] = False
+        elif act == 'refresh':
+            _new_token()
+            _token['enabled'] = True
+        else:
+            return jsonify({'success': False, 'error': '未知操作'})
+        if not _save_token():
+            return jsonify({'success': False, 'error': '保存失败，请检查程序目录写入权限'})
+    return jsonify({'success': True, 'enabled': _token['enabled'], 'token': _token['value'],
+                    'visible': bool(_token['value']),
+                    'has_token': bool(_token['value'] or _token['hash']),
+                    'broken': bool(_token.get('broken')),
+                    'created': _token['created'],
+                    'created_str': fnow(_token['created']) if _token['created'] else '',
+                    'url': f'http://{get_local_ip()}:{HTTP_PORT}/api/terminal/exec_token',
+                    'hours': REQ_LOG_HOURS,
+                    'requests': list(reversed(REQ_LOG[-60:]))})
+
+
+@app.route('/api/terminal/exec_token', methods=['GET', 'POST'])
+def api_term_token_exec():
+    if not token_ok():
+        return jsonify({'success': False, 'error': 'token 无效或接口未启用'}), 401
+    d = request.get_json(silent=True) or {}
+    cmd = (d.get('cmd') or request.args.get('cmd') or '').strip()
+    if not cmd:
+        return jsonify({'success': False, 'error': '缺少 cmd 参数'}), 400
+    cwd = (d.get('cwd') or request.args.get('cwd') or '').strip()
+    wd = abspath(cwd) if cwd else (get_root() or os.path.expanduser('~'))
+    if not os.path.isdir(wd):
+        wd = get_root() or os.path.expanduser('~')
+    try:
+        timeout = max(1, min(int(d.get('timeout') or request.args.get('timeout') or 30), 300))
+    except ValueError:
+        timeout = 30
+    started = time.time()
+    try:
+        p = subprocess.run(cmd, shell=True, cwd=wd, capture_output=True, timeout=timeout)
+        out = (p.stdout + p.stderr).decode(ENC, 'replace')
+        code = p.returncode
+    except subprocess.TimeoutExpired:
+        out, code = f'命令超时（{timeout}s）', -1
+    except Exception as e:
+        out, code = f'执行失败: {e}', -2
+    dur = time.time() - started
+    log_request('token', cmd, code, dur, len(out), request.remote_addr or '')
+    return jsonify({'success': code == 0, 'exit_code': code, 'duration': round(dur, 2),
+                    'cwd': wd, 'output': out[-20000:]})
+
+
 @app.route('/api/terminal/platform')
 def api_plat():
     return jsonify({'success':True,'os':PLAT['os'],'name':PLAT['name'],'shell':PLAT['shell'],'encoding':ENC,'commands':sorted(CMDS)})
