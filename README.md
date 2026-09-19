@@ -15,7 +15,7 @@
 
 ### 方式一：下载免安装版（Windows，不需要 Python）
 
-到 [发行版页面](https://gitee.com/willdomybest/yueya/releases/latest) 下载 `RemoteFM-v1.1.0-windows-x64.zip`，
+到 [发行版页面](https://gitee.com/willdomybest/yueya/releases/latest) 下载 `RemoteFM-v1.3.0-windows-x64.zip`，
 解压后双击 `RemoteFM.exe` 就能用——**不用装 Python、不用装依赖、没有安装过程**，解压即跑。
 
 > 能访问 GitHub 的话也可以从 [GitHub Releases](https://github.com/willdomybest/yueya/releases/latest) 下载；
@@ -89,8 +89,10 @@ python RemoteFM.py
 
 | 角色 | 能做什么 |
 | --- | --- |
-| **超级用户** | 默认 `admin / admin123`（可用 `SD_USER` / `SD_PASS` 修改）。切换根目录、使用终端与进程管理、修改任意用户密码、添加和删除普通用户 |
-| **普通用户** | 由超级用户在界面上添加（用户名、密码、根目录）。**只能在自己根目录内**浏览、上传、下载、压缩、重命名、复制、移动、删除；看不到终端、进程与 FTP 面板，即使输入 `../` 也无法越出根目录 |
+| **超级用户** | 默认 `admin / admin123`（可用 `SD_USER` / `SD_PASS` 修改）。切换根目录、使用终端与进程管理、进入用户管理（添加 / 编辑 / 删除普通用户、修改任意密码） |
+| **普通用户** | 由超级用户添加，**目录范围可多选**（例如 `D:\tt` + `D:\App` + `E:\Lenovo`）。只能在这些目录内浏览、上传、下载、压缩、重命名、复制、移动、删除；跨目录范围的移动会被拒绝。看不到终端、进程、FTP，也**看不到用户管理入口**；即使输入 `../` 也无法越出范围 |
+
+用户管理是接近「进程管理」的全屏面板：左侧账号表格（用户名 / 角色 / 目录范围 / 操作），右侧就地展开添加、编辑（改名、改密、调整目录范围）表单，不会用弹窗盖住界面。
 
 用户数据保存在程序同目录的 `users.json`（打包版为 exe 同目录），密码使用「随机盐 + SHA-256」存储；
 目录不可写时会自动改用用户主目录下的 `.remotefm/users.json`，也可用 `SD_USERS` 指定路径。

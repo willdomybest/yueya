@@ -15,7 +15,7 @@
 
 ### Option 1: download the portable build (Windows, no Python needed)
 
-Grab `RemoteFM-v1.1.0-windows-x64.zip` from the [releases page](https://github.com/willdomybest/yueya/releases/latest),
+Grab `RemoteFM-v1.3.0-windows-x64.zip` from the [releases page](https://github.com/willdomybest/yueya/releases/latest),
 unzip it and double-click `RemoteFM.exe` — **no Python, no dependencies, no installer**, it just runs.
 
 > In China you can also download from [Gitee Releases](https://gitee.com/willdomybest/yueya/releases/latest).
@@ -89,8 +89,11 @@ Everything is configured through environment variables — no config file, chang
 
 | Role | What it can do |
 | --- | --- |
-| **Superuser** | `admin / admin123` by default (change it with `SD_USER` / `SD_PASS`). Switch the root directory, use the terminal and process manager, change any password, add and remove normal users |
-| **Normal user** | Created by the superuser (username, password, root directory). Can only browse, upload, download, compress, rename, copy, move and delete **inside their own root directory**; the terminal, process manager and FTP panel stay hidden, and `../` cannot escape the root |
+| **Superuser** | `admin / admin123` by default (change it with `SD_USER` / `SD_PASS`). Switch the root directory, use the terminal and process manager, and open user management (add / edit / remove normal users, change any password) |
+| **Normal user** | Created by the superuser with a **multi-directory scope** (for example `D:\tt` + `D:\App` + `E:\Lenovo`). Can only browse, upload, download, compress, rename, copy, move and delete **inside those directories**; moving across scopes is rejected. The terminal, process manager and FTP panel stay hidden, the user-management entry is hidden too, and `../` cannot escape the scope |
+
+User management is a full-screen panel close to the process manager: accounts (name / role / scope / actions) on
+the left, add & edit forms (rename, password, adjust scope) opening in place on the right.
 
 User data lives in `users.json` next to the program (next to the exe for packaged builds) and passwords are
 stored as random-salt SHA-256 hashes. If that directory is not writable it falls back to

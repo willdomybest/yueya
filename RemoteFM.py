@@ -157,18 +157,43 @@ def _verify(name, pw):
 
 def current_user():
     """当前登录用户；后台线程/启动阶段没有会话时按超级用户处理。"""
-    name = _auth['user']
     try:
-        name = session.get('user') or name
+        name = session.get('user')
     except RuntimeError:
-        pass
+        name = None
+    if not name:                       # 无会话：启动信息、后台线程
+        roots = [_cfg['root']] if _cfg['root'] else []
+        return {'name': _auth['user'], 'admin': True, 'root': _cfg['root'], 'roots': roots}
     if name == _auth['user']:
-        return {'name': name, 'admin': True, 'root': _cfg['root']}
+        roots = [_cfg['root']] if _cfg['root'] else []
+        return {'name': name, 'admin': True, 'root': _cfg['root'], 'roots': roots}
     rec = _users.get(name)
     if rec:
+        roots = norm_roots(rec)
         return {'name': name, 'admin': bool(rec.get('admin')),
-                'root': rec['root'] if rec.get('root') else _cfg['root']}
-    return {'name': _auth['user'], 'admin': True, 'root': _cfg['root']}
+                'root': roots[0] if roots else '', 'roots': roots}
+    # 用户已被删除或改名：按未登录处理，绝不能回退成超级用户
+    return {'name': name, 'admin': False, 'root': '', 'roots': []}
+
+
+def norm_roots(rec):
+    """用户记录里保存的目录范围（兼容旧的单 root 字段）。"""
+    out = []
+    for r in (rec.get('roots') or ([rec['root']] if rec.get('root') else [])):
+        r = (r or '').strip()
+        if r:
+            out.append(os.path.abspath(r))
+    return out
+
+
+def session_user_valid():
+    try:
+        n = session.get('user')
+    except RuntimeError:
+        return True
+    if not n:
+        return False
+    return n == _auth['user'] or n in _users
 
 
 def is_admin():
@@ -230,6 +255,9 @@ def _need_login():
     if request.path in ('/login', '/favicon.ico', '/favicon.svg'):
         return False
     if session.get('logged_in'):
+        if not session_user_valid():       # 账号被删除或改名后，旧会话立即失效
+            session.clear()
+            return True
         return False
     a = request.authorization
     if a and _check_auth(a.username, a.password):
@@ -350,9 +378,37 @@ def get_root():
     return current_user()['root']
 
 
+def user_roots():
+    """当前用户的目录范围（普通用户可以有多个目录）。"""
+    return current_user().get('roots') or []
+
+
 def is_unrestricted():
-    """根目录为空 = 可访问整台计算机。"""
-    return get_root() == ''
+    """只有超级用户、且没有设置目录范围时才表示「整台计算机」；普通用户空范围 = 无权限。"""
+    u = current_user()
+    return bool(u['admin']) and not u.get('roots')
+
+
+def root_aliases():
+    """{别名: 绝对路径}，别名取目录名，重名自动加序号。"""
+    m = {}
+    for r in user_roots():
+        r = os.path.abspath(r)
+        base = os.path.basename(r.rstrip('\\/')) or r
+        k, i = base, 2
+        while k in m:
+            k = f'{base}({i})'
+            i += 1
+        m[k] = r
+    return m
+
+
+def in_scope(p):
+    """路径是否落在当前用户的目录范围内。"""
+    if is_unrestricted():
+        return True
+    ap = os.path.abspath(p)
+    return any(_inside(ap, r) for r in user_roots())
 
 
 def drive_list():
@@ -363,9 +419,15 @@ def drive_list():
 
 
 def rel_to_root(p):
-    """有根目录时返回相对路径，整机模式保持绝对路径。"""
-    r = get_root()
-    return p.replace(os.sep, '/') if not r else os.path.relpath(p, r).replace(os.sep, '/')
+    """转成前端路径：单根为相对路径，多根为「别名/相对路径」，整机模式保持绝对路径。"""
+    if is_unrestricted():
+        return p.replace(os.sep, '/')
+    ap = os.path.abspath(p)
+    for k, r in root_aliases().items():
+        if _inside(ap, r):
+            rel = os.path.relpath(ap, r).replace(os.sep, '/')
+            return k if rel == '.' else k + '/' + rel
+    return p.replace(os.sep, '/')
 
 
 def set_root(p):
@@ -470,10 +532,29 @@ def _inside(path, root):
 
 def abspath(rp, root=None):
     """把相对路径解析成绝对路径，并强制留在根目录内（含软链接逃逸检查）。"""
-    base = get_root() if root is None else root
+    if root is not None:
+        return _join_root(rp, root)
+    roots = user_roots()
+    if not roots:
+        if is_unrestricted():
+            return os.path.abspath(rp) if rp else ''
+        return os.path.join(tempfile.gettempdir(), '.remotefm-none')
+    if len(roots) == 1:
+        return _join_root(rp, roots[0])
+    parts = [x for x in str(rp).replace('\\', '/').split('/') if x not in ('', '.')]
+    if not parts:
+        return ''                      # 多根时的虚拟顶层
+    base = root_aliases().get(parts[0])
     if not base:
-        return os.path.abspath(rp) if rp else ''
-    ar = os.path.abspath(base)
+        cand = os.path.abspath(rp) if os.path.isabs(rp) else ''
+        if cand and any(_inside(cand, r) for r in roots):
+            return cand
+        return ''                      # 未知别名 → 回到虚拟顶层
+    return os.path.abspath(os.path.join(base, *parts[1:]))
+
+
+def _join_root(rp, root):
+    ar = os.path.abspath(root)
     ap = os.path.abspath(os.path.join(ar, rp))
     if not _inside(ap, ar):
         return ar
@@ -489,6 +570,11 @@ def list_items(cap, kw='', sb='name', od='asc'):
     if cap == '' and is_unrestricted():
         return [{'name': d, 'path': d, 'abs': d, 'is_dir': True, 'size': -1, 'size_str': '-',
                  'ext': '', 'mtime': 0, 'mtime_str': ''} for d in drive_list()]
+    if cap == '':
+        return [{'name': k, 'path': k, 'abs': v, 'is_dir': True, 'size': -1, 'size_str': '-',
+                 'ext': '', 'mtime': os.path.getmtime(v) if os.path.exists(v) else 0,
+                 'mtime_str': fnow(os.path.getmtime(v)) if os.path.exists(v) else ''}
+                for k, v in root_aliases().items()]
     items = []
     if not os.path.exists(cap): return items
     for n in os.listdir(cap):
@@ -576,7 +662,7 @@ def bg_batch_task(task_id, paths, target, operation, root=None):
         'message': '正在计算大小…', 'total': len(paths), 'done': 0,
         'errors': [], 'src': paths, 'dst': target,
     }
-    at = abspath(target, root)
+    at = target if os.path.isabs(target) else abspath(target, root)
     try:
         os.makedirs(at, exist_ok=True)
     except Exception as e:
@@ -586,7 +672,7 @@ def bg_batch_task(task_id, paths, target, operation, root=None):
     total_size = 0
     items = []
     for p in paths:
-        src = abspath(p, root)
+        src = p if os.path.isabs(p) else abspath(p, root)
         if not os.path.exists(src):
             bg_tasks[task_id]['errors'].append(f'{p}: 不存在')
             continue
@@ -787,6 +873,13 @@ body{font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;font-size
 .tree-empty{color:#b3b9c7;font-size:12px;padding:3px 8px}
 .picker-box{height:300px;overflow:auto;border:1px solid #e6e8ec;border-radius:6px;padding:6px;background:#fafbfc}
 .picker-path{font-family:Consolas,monospace;font-size:12px;color:#4a5568;background:#f4f6fa;border-radius:5px;padding:6px 8px;margin-bottom:10px;word-break:break-all}
+.picker-count{margin-top:10px;font-size:12.5px;color:#4a6cf7;font-weight:600}
+.scope-list{margin-bottom:8px}
+.scope-item{display:flex;align-items:center;gap:8px;background:#f4f6fa;border:1px solid #e6e8ec;border-radius:7px;padding:7px 10px;margin-bottom:6px}
+.scope-path{flex:1;min-width:0;font-family:Consolas,monospace;font-size:12px;color:#4a5568;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.scope-del{border:0;background:transparent;color:#b3b9c7;cursor:pointer;font-size:13px;padding:0 2px}
+.scope-del:hover{color:#e74c3c}
+.scope-empty{font-size:12px;color:#b3b9c7;padding:8px 10px;border:1px dashed #e6e8ec;border-radius:7px;margin-bottom:6px}
 .user-row{display:flex;align-items:center;gap:8px;padding:6px 8px;border-bottom:1px solid #f0f2f7;font-size:13px}
 .user-row .uname{font-weight:600;color:#2c3e50;min-width:104px}
 .user-row .uroot{color:#7a8299;font-family:Consolas,monospace;font-size:11.5px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -818,6 +911,20 @@ table.user-table button.mini.danger{color:#e74c3c;border-color:#fdd6d6}
 .user-side.show{display:block}
 .user-side h4{margin:0 0 12px;font-size:14px;color:#2c3e50}
 .user-footer{height:28px;background:#fafbfc;border-top:1px solid #ebedf1;display:flex;align-items:center;padding:0 16px;font-size:12px;color:#7a8299;flex-shrink:0}
+.user-side .side-lead{margin:-6px 0 16px;font-size:12px;color:#9aa3b5;line-height:1.6}
+.field-lbl{display:block;font-size:12.5px;font-weight:600;color:#4a5568;margin-bottom:6px}
+.side-input{width:100%;padding:9px 11px;border:1px solid #dfe3eb;border-radius:7px;font-size:13.5px;font-family:inherit;outline:0;transition:.15s;background:#fff}
+.side-input:focus{border-color:#4a6cf7;box-shadow:0 0 0 3px rgba(74,108,247,.12)}
+.side-input::placeholder{font-size:12px;color:#b6bcc8}
+.field-hint{font-size:11.5px;color:#9aa3b5;margin-top:5px;line-height:1.5}
+.side-section{margin-bottom:16px}
+.input-row{display:flex;gap:8px}
+.input-row .side-input{flex:1;min-width:0}
+.btn-ghost{padding:9px 12px;border:1px solid #dfe3eb;background:#fff;border-radius:7px;cursor:pointer;font-size:13px;color:#4a5568;white-space:nowrap}
+.btn-ghost:hover{background:#f5f7fb}
+.btn-primary{padding:9px 16px;border:0;background:#4a6cf7;color:#fff;border-radius:7px;cursor:pointer;font-size:13px;font-weight:500}
+.btn-primary:hover{background:#3a5ce0}
+.side-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:18px;padding-top:14px;border-top:1px solid #eef1f8}
 @media (max-width:760px){.sidebar{display:none}}
 .file-area{flex:1;min-height:0;overflow:auto;position:relative}
 .file-area.dragover::after{content:"松开鼠标上传文件到此处";position:absolute;inset:0;background:rgba(74,108,247,.1);border:3px dashed #4a6cf7;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:20px;color:#4a6cf7;font-weight:600;z-index:10;pointer-events:none}
@@ -849,7 +956,7 @@ table.file-table .row-actions button.danger:hover{background:#fee;color:#e74c3c;
 .ctx-menu .item.danger:hover{background:#fdeceb}
 .ctx-menu .item .icon{width:16px;text-align:center;font-size:14px}
 .ctx-menu .divider{height:1px;background:#ebedf1;margin:4px 0}
-.modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.45);display:none;align-items:center;justify-content:center;z-index:2000;padding:20px}
+.modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.45);display:none;align-items:center;justify-content:center;z-index:4200;padding:20px}
 .modal-bg.show{display:flex}
 .modal{background:#fff;border-radius:10px;padding:24px;width:100%;max-width:520px;box-shadow:0 20px 60px rgba(0,0,0,.3);animation:pop .2s}
 .modal.wide{max-width:640px}
@@ -1086,7 +1193,7 @@ table.process-table tbody tr:hover .process-actions{opacity:1}
 
 <div class="modal-bg" id="renameModal"><div class="modal"><h3>重命名</h3><div class="form-row"><label>新名称</label><input type="text" id="renameInput" onkeydown="if(event.key==='Enter')doRename()"><div class="hint">只改名称，不能输入路径分隔符</div></div><div class="actions"><button onclick="closeModal('renameModal')">取消</button><button class="primary" onclick="doRename()">确定</button></div></div></div>
 
-<div class="modal-bg" id="pickerModal"><div class="modal" style="max-width:560px"><h3 id="pickerTitle">选择目标目录</h3><div class="picker-path" id="pickerPath">/</div><div class="picker-box" id="pickerTree"></div><div class="actions"><button onclick="closeModal('pickerModal')">取消</button><button class="primary" onclick="pickerOk()">选择此目录</button></div></div></div>
+<div class="modal-bg" id="pickerModal"><div class="modal" style="max-width:560px"><h3 id="pickerTitle">选择目标目录</h3><div class="picker-path" id="pickerPath">/</div><div class="picker-box" id="pickerTree"></div><div class="picker-count" id="pickerCount" style="display:none"></div><div class="actions"><button onclick="closeModal('pickerModal')">取消</button><button class="primary" id="pickerOkBtn" onclick="pickerOk()">选择此目录</button></div></div></div>
 
 <div class="user-panel" id="userPanel">
 <div class="user-topbar">
@@ -1198,7 +1305,7 @@ $('previewModal').addEventListener('click',e=>{if(e.target.id==='previewModal'||
 function showRootModal(){$('rootInput').value=currentRoot;$('rootModal').classList.add('show');setTimeout(()=>{$('rootInput').focus();$('rootInput').select()},50)}
 async function doSetRoot(){const p=$('rootInput').value.trim();
 try{const r=await fretry('/api/set_root',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:p})});const d=await r.json();
-if(d.success){currentRoot=d.root;$('rootPathDisplay').textContent=currentRoot;closeModal('rootModal');toast('已切换','success');histStack=[''];histIdx=0;currentPath='';load('')}else{toast(d.error||'失败','error')}}catch(e){toast(e.message,'error')}}
+if(d.success){currentRoot=d.root;$('rootPathDisplay').textContent=currentRoot;closeModal('rootModal');toast('已切换','success');histStack=[''];histIdx=0;currentPath='';treeInit();load('')}else{toast(d.error||'失败','error')}}catch(e){toast(e.message,'error')}}
 async function apiList(p,kw=keyword,sb=sortBy,od=order){const r=await fretry(`/api/list?path=${encodeURIComponent(p)}&keyword=${encodeURIComponent(kw)}&sort_by=${sb}&order=${od}`);if(!r.ok)throw new Error('加载失败');return r.json()}
 async function loadInitRoot(){try{const r=await fretry('/api/get_root');const d=await r.json();currentRoot=d.root;$('rootPathDisplay').textContent=currentRoot}catch(e){}}
 async function loadPlat(){try{const r=await fretry('/api/terminal/platform');const d=await r.json();if(d.success){plat=d;$('terminalPlatform').textContent=d.name;$('terminalPrompt').textContent=d.os==='windows'?'>':'$';$('terminalInput').placeholder=d.os==='windows'?'输入命令（如 dir、ipconfig），按 Tab 补全...':'输入命令（如 ls、pwd），按 Tab 补全...'}}catch(e){}}
@@ -1624,7 +1731,8 @@ async function procKill(pid,name,btn){
 
 /* ================= 目录树 / 目录选择器 / 重命名 / 用户管理 ================= */
 const treeIndex={};
-async function treeFetch(path){const r=await fretry('/api/tree?path='+encodeURIComponent(path));const d=await r.json();return d.dirs||[]}
+let treeAllMode=false;   // 为「用户根目录」选目录时允许浏览整台计算机
+async function treeFetch(path){const r=await fretry('/api/tree?path='+encodeURIComponent(path)+(treeAllMode?'&all=1':''));const d=await r.json();return d.dirs||[]}
 async function treeEnsure(kids,tog,path,factory){
   if(kids.dataset.loaded!=='1'){
     kids.innerHTML='<div class="tree-empty">加载中…</div>';
@@ -1653,7 +1761,8 @@ function treeNode(path,name){
   treeIndex[path]={row:row,kids:kids,tog:tog};
   return wrap;
 }
-async function treeInit(){const box=$('treeRoot');if(!box)return;box.innerHTML='';box.appendChild(treeNode('','🏠 根目录'));
+async function treeInit(){treeAllMode=false;for(const k in treeIndex)delete treeIndex[k];
+  const box=$('treeRoot');if(!box)return;box.innerHTML='';box.appendChild(treeNode('','🏠 根目录'));
   const n=treeIndex[''];if(n)await treeEnsure(n.kids,n.tog,'',treeNode);treeMark()}
 function treeMark(){document.querySelectorAll('#treeRoot .tree-row.active').forEach(e=>e.classList.remove('active'));
   const n=treeIndex[currentPath];if(n)n.row.classList.add('active')}
@@ -1662,6 +1771,7 @@ async function treeReveal(){const parts=currentPath.split('/').filter(Boolean);l
   treeMark()}
 
 let pickerCb=null,pickerTarget='',pickerIdx={};
+let pickerMulti=false,pickerSel=new Set();
 function pickerNode(path,name){
   const wrap=document.createElement('div');wrap.className='tree-node';
   const row=document.createElement('div');row.className='tree-row';row.dataset.path=path;
@@ -1676,19 +1786,39 @@ function pickerNode(path,name){
   return wrap;
 }
 function pickerPick(path,row){
+  if(pickerMulti){
+    if(pickerSel.has(path))pickerSel.delete(path); else pickerSel.add(path);
+    if(row)row.classList.toggle('active',pickerSel.has(path));
+    pickerCount();
+    return;
+  }
   pickerTarget=path;$('pickerPath').textContent=path||'/';
   document.querySelectorAll('#pickerTree .tree-row.active').forEach(e=>e.classList.remove('active'));
   if(row)row.classList.add('active');
 }
-async function pickerOpen(title,cb,start){
-  pickerCb=cb;pickerTarget=start||'';pickerIdx={};
+function pickerCount(){
+  const el=$('pickerCount');if(!el)return;
+  if(!pickerMulti){el.style.display='none';return}
+  el.style.display='';
+  el.textContent=pickerSel.size?`已选择 ${pickerSel.size} 个目录`:'还未选择目录（点击左侧目录即可勾选）';
+  $('pickerOkBtn').textContent=pickerSel.size?`添加选中的 ${pickerSel.size} 个目录`:'确定';
+}
+async function pickerOpen(title,cb,start,whole,multi){
+  pickerMulti=!!multi;
+  pickerSel=new Set(multi?(Array.isArray(start)?start:(start?[start]:[])):[]);
+  pickerCb=cb;pickerTarget=multi?'':(start||'');pickerIdx={};treeAllMode=!!whole;
   $('pickerTitle').textContent=title;$('pickerPath').textContent=pickerTarget||'/';
   const box=$('pickerTree');box.innerHTML='';box.appendChild(pickerNode('','🏠 根目录'));
+  $('pickerOkBtn').textContent=multi?'确定':'选择此目录';
+  pickerCount();
   $('pickerModal').classList.add('show');
   const n=pickerIdx[''];if(n)await treeEnsure(n.kids,n.tog,'',pickerNode);
-  if(pickerTarget&&pickerIdx[pickerTarget])pickerPick(pickerTarget,pickerIdx[pickerTarget].row);
+  if(!multi&&pickerTarget&&pickerIdx[pickerTarget])pickerPick(pickerTarget,pickerIdx[pickerTarget].row);
+  if(multi)pickerSel.forEach(p=>{const it=pickerIdx[p];if(it)it.row.classList.add('active')});
 }
-function pickerOk(){closeModal('pickerModal');const cb=pickerCb;pickerCb=null;if(cb)cb(pickerTarget)}
+function pickerOk(){closeModal('pickerModal');treeAllMode=false;
+  const cb=pickerCb,val=pickerMulti?Array.from(pickerSel):pickerTarget;
+  pickerCb=null;pickerMulti=false;if(cb)cb(val)}
 
 let renameTarget=null;
 function showRename(it){if(!it)return;renameTarget=it;$('renameInput').value=it.name;
@@ -1716,51 +1846,117 @@ function applyRole(){
   ['btnProcess','btnTerminal'].forEach(id=>{const b=$(id);if(b)b.style.display='none'});
   const rb=document.querySelector('.root-btn');if(rb)rb.style.display='none';
   ['terminalPanel','processPanel'].forEach(id=>{const e=$(id);if(e)e.style.display='none'});
+  ['btnUsers'].forEach(id=>{const e=$(id);if(e)e.style.display='none'});   // 用户管理仅超级用户可见
+}
+let userCache=[];
+let formScope=[];
+function scopeRender(){
+  const box=$('scopeList');if(!box)return;
+  box.innerHTML=formScope.length
+    ? formScope.map((p,i)=>`<div class="scope-item"><span class="scope-path" title="${esc(p)}">${esc(p)}</span>`+
+        `<button class="scope-del" onclick="scopeRemove(${i})" title="移除该目录">✕</button></div>`).join('')
+    : '<div class="scope-empty">还没有添加目录</div>';
+}
+function scopeRemove(i){formScope.splice(i,1);scopeRender()}
+function scopeAdd(){
+  pickerOpen('添加目录到范围（可多选）',sel=>{
+    (Array.isArray(sel)?sel:[sel]).forEach(p=>{if(p&&!formScope.includes(p))formScope.push(p)});
+    scopeRender();
+  },'',true,true);
 }
 function openUserPanel(){$('userPanel').classList.add('show');$('userSide').classList.remove('show');loadUsers()}
 function closeUserPanel(){$('userPanel').classList.remove('show')}
+function closeUserSide(){$('userSide').classList.remove('show')}
 function userForm(mode,name){
   const box=$('userSide');box.classList.add('show');
   if(mode==='pass'){
-    box.innerHTML=`<h4>修改密码 · ${esc(name)}</h4>`+
-      `<div class="form-row"><label>原密码${name===me.name?'（必填）':'（超级用户可留空）'}</label><input type="password" id="pfOld" placeholder="原密码"></div>`+
-      `<div class="form-row"><label>新密码（至少 4 位）</label><input type="password" id="pfNew" placeholder="新密码" onkeydown="if(event.key==='Enter')userSubmitPass('${esc(name)}')"></div>`+
-      `<div class="actions"><button onclick="$('userSide').classList.remove('show')">取消</button><button class="primary" onclick="userSubmitPass('${esc(name)}')">保存</button></div>`;
-    setTimeout(()=>$('pfNew').focus(),50);
+    box.innerHTML=
+      `<h4>修改密码</h4>`+
+      `<div class="side-lead">正在修改 <b>${esc(name)}</b> 的登录密码${name===me.name?'，需要先验证原密码':'，超级用户可直接重置'}。</div>`+
+      `<div class="side-section"><label class="field-lbl">原密码</label>`+
+      `<input class="side-input" type="password" id="pfOld" placeholder="${name===me.name?'请输入当前密码':'超级用户可留空'}"></div>`+
+      `<div class="side-section"><label class="field-lbl">新密码</label>`+
+      `<input class="side-input" type="password" id="pfNew" placeholder="至少 4 位" onkeydown="if(event.key==='Enter')userSubmitPass('${esc(name)}')">`+
+      `<div class="field-hint">保存后立即生效，该账号下次登录请使用新密码。</div></div>`+
+      `<div class="side-actions"><button class="btn-ghost" onclick="closeUserSide()">取消</button>`+
+      `<button class="btn-primary" onclick="userSubmitPass('${esc(name)}')">保存密码</button></div>`;
+    setTimeout(()=>{const e=$('pfNew');if(e)e.focus()},50);
+  }else if(mode==='edit'){
+    const u=userCache.find(x=>x.name===name)||{};
+    formScope=(u.roots&&u.roots.length?u.roots.slice():(u.root?[u.root]:[]));
+    box.innerHTML=
+      `<h4>编辑用户</h4>`+
+      `<div class="side-lead">可以修改用户名、根目录；密码留空则保持原样，改动立即生效。</div>`+
+      `<div class="side-section"><label class="field-lbl">用户名</label>`+
+      `<input class="side-input" id="nfName" value="${esc(u.name||'')}" autocomplete="off">`+
+      `<div class="field-hint">改名后请通知对方用新用户名登录，原会话会自动失效。</div></div>`+
+      `<div class="side-section"><label class="field-lbl">新密码</label>`+
+      `<input class="side-input" type="password" id="nfPass" placeholder="留空 = 不修改密码" autocomplete="new-password"></div>`+
+      `<div class="side-section"><label class="field-lbl">目录范围</label>`+
+      `<div class="scope-list" id="scopeList"></div>`+
+      `<button class="btn-ghost" onclick="scopeAdd()">＋ 添加目录</button>`+
+      `<div class="field-hint">可添加多个目录，该用户只能在这些目录内操作；移除全部目录则无法访问任何文件。</div></div>`+
+      `<div class="side-actions"><button class="btn-ghost" onclick="closeUserSide()">取消</button>`+
+      `<button class="btn-primary" onclick="userSubmitEdit('${esc(name)}')">保存修改</button></div>`;
+    scopeRender();
+    setTimeout(()=>{const e=$('nfName');if(e)e.focus()},50);
   }else{
-    box.innerHTML=`<h4>添加普通用户</h4>`+
-      `<div class="form-row"><label>用户名</label><input type="text" id="nfName" placeholder="例如 zhangsan"></div>`+
-      `<div class="form-row"><label>密码（至少 4 位）</label><input type="text" id="nfPass" placeholder="登录密码"></div>`+
-      `<div class="form-row"><label>根目录</label><input type="text" id="nfRoot" placeholder="留空 = 自动创建同名文件夹"><div class="hint">普通用户只能在这个目录内操作</div>`+
-      `<button onclick="pickUserRoot()">📂 浏览目录</button></div>`+
-      `<div class="actions"><button onclick="$('userSide').classList.remove('show')">取消</button><button class="primary" onclick="userSubmitAdd()">创建用户</button></div>`;
-    setTimeout(()=>$('nfName').focus(),50);
+    formScope=[];
+    box.innerHTML=
+      `<h4>添加普通用户</h4>`+
+      `<div class="side-lead">该账号只能访问你指定的根目录，看不到终端、进程与 FTP 面板。</div>`+
+      `<div class="side-section"><label class="field-lbl">用户名</label>`+
+      `<input class="side-input" id="nfName" placeholder="例如 zhangsan" autocomplete="off">`+
+      `<div class="field-hint">登录时使用，不能与超级用户重名。</div></div>`+
+      `<div class="side-section"><label class="field-lbl">密码</label>`+
+      `<input class="side-input" id="nfPass" placeholder="至少 4 位" autocomplete="new-password"></div>`+
+      `<div class="side-section"><label class="field-lbl">目录范围</label>`+
+      `<div class="scope-list" id="scopeList"></div>`+
+      `<button class="btn-ghost" onclick="scopeAdd()">＋ 添加目录</button>`+
+      `<div class="field-hint">可多选。不添加任何目录时，会在超级用户根目录下自动创建同名文件夹。</div></div>`+
+      `<div class="side-actions"><button class="btn-ghost" onclick="closeUserSide()">取消</button>`+
+      `<button class="btn-primary" onclick="userSubmitAdd()">创建用户</button></div>`;
+    scopeRender();
+    setTimeout(()=>{const e=$('nfName');if(e)e.focus()},50);
   }
 }
 async function loadUsers(){
   try{const r=await fretry('/api/users');const d=await r.json();
     if(!d.success){toast(d.error||'加载失败','error');return}
+    userCache=d.users;
     const admins=d.users.filter(u=>u.admin).length,normal=d.users.length-admins;
     $('userStats').innerHTML=`<span>共 <b>${d.users.length}</b> 个账号</span><span>超级用户 <b>${admins}</b></span><span>普通用户 <b>${normal}</b></span><span>数据文件 ${esc(d.file||'')}</span>`;
     let h='';d.users.forEach(u=>{
       h+=`<tr><td class="uname">${esc(u.name)}</td>`+
          `<td><span class="role ${u.admin?'admin':'user'}">${u.admin?'超级用户':'普通用户'}</span></td>`+
-         `<td class="mono" title="${esc(u.root||'')}">${esc(u.root||'—')}</td>`+
+         `<td class="mono" title="${esc((u.roots&&u.roots.length?u.roots:[u.root]).filter(Boolean).join('\n'))}">`+
+         `${esc((u.roots&&u.roots.length>1)?(u.roots.length+' 个目录'):(u.root||'—'))}</td>`+
          `<td><button class="mini" onclick="userForm('pass','${esc(u.name)}')">改密码</button>`+
-         (u.admin?'':`<button class="mini danger" onclick="delUser('${esc(u.name)}')">删除</button>`)+`</td></tr>`});
+         (u.admin?'':`<button class="mini" onclick="userForm('edit','${esc(u.name)}')">编辑</button>`+
+                    `<button class="mini danger" onclick="delUser('${esc(u.name)}')">删除</button>`)+`</td></tr>`});
     $('userRows').innerHTML=h||'<tr><td colspan="4" style="color:#b3b9c7">暂无账号</td></tr>';
     $('userFooter').textContent=`共 ${d.users.length} 个账号 · 普通用户仅能访问自己的根目录`;
     $('btnAddUser').style.display=me.admin?'':'none';
   }catch(e){toast(e.message,'error')}
 }
 async function userSubmitAdd(){
-  const n=$('nfName').value.trim(),p=$('nfPass').value,r=$('nfRoot').value.trim();
+  const n=$('nfName').value.trim(),p=$('nfPass').value;
   if(!n||!p){toast('用户名和密码不能为空','error');return}
   try{const rs=await fretry('/api/users',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({name:n,password:p,root:r})});
+      body:JSON.stringify({name:n,password:p,roots:formScope})});
     const d=await rs.json();
     if(d.success){toast('已创建用户 '+n,'success');$('userSide').classList.remove('show');loadUsers()}
     else toast(d.error||'创建失败','error')}catch(e){toast(e.message,'error')}
+}
+async function userSubmitEdit(old){
+  const nn=$('nfName').value.trim(),np=$('nfPass').value;
+  if(!nn){toast('用户名不能为空','error');return}
+  if(!formScope.length&&!confirm('目录范围为空，保存后 '+nn+' 将无法访问任何文件。确定保存吗？'))return;
+  try{const rs=await fretry('/api/users',{method:'PUT',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({name:old,new_name:nn,password:np,roots:formScope})});
+    const d=await rs.json();
+    if(d.success){toast('已保存 '+(d.name||nn),'success');$('userSide').classList.remove('show');loadUsers()}
+    else toast(d.error||'保存失败','error')}catch(e){toast(e.message,'error')}
 }
 async function userSubmitPass(name){
   const o=$('pfOld').value,np=$('pfNew').value;
@@ -1774,8 +1970,7 @@ async function userSubmitPass(name){
 async function delUser(n){if(!confirm('确定删除用户 '+n+' ？该用户将无法再登录。'))return;
   try{const r=await fretry('/api/users',{method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:n})});
     const d=await r.json();if(d.success){toast('已删除 '+n,'success');loadUsers()}else toast(d.error||'删除失败','error')}catch(e){toast(e.message,'error')}}
-function pickUserRoot(){pickerOpen('选择该用户的根目录',rel=>{
-  $('nfRoot').value=rel?(currentRoot.replace(/[\\/]+$/,'')+'/'+rel):currentRoot;},'')}
+function pickUserRoot(){pickerOpen('为该用户选择根目录',abs=>{if($('nfRoot'))$('nfRoot').value=abs||'';},'',true)}
 
 (async()=>{await loadMe();await loadInitRoot();loadFtpInfo();await treeInit();load('');if(me.admin)initTerm()})();
 </script></body></html>'''
@@ -1818,10 +2013,30 @@ def api_set_root():
     return jsonify({'success':True,'root':r}) if ok else jsonify({'success':False,'error':r})
 
 
+def _parse_roots(d, fallback=None):
+    """解析目录范围：优先 roots 列表，其次单个 root，最后用 fallback。"""
+    raw = d.get('roots')
+    if not isinstance(raw, list):
+        one = (d.get('root') if d.get('root') is not None else fallback) or ''
+        raw = [one] if str(one).strip() else []
+    out = []
+    for r in raw:
+        r = (r or '').strip()
+        if not r:
+            continue
+        r = os.path.abspath(r)
+        if not os.path.isdir(r):
+            return [], f'目录不存在：{r}'
+        if r not in out:
+            out.append(r)
+    return out, ''
+
+
 @app.route('/api/me')
 def api_me():
     u = current_user()
-    return jsonify({'success': True, 'name': u['name'], 'admin': u['admin'], 'root': u['root']})
+    return jsonify({'success': True, 'name': u['name'], 'admin': u['admin'],
+                    'root': u['root'], 'roots': u.get('roots') or []})
 
 
 @app.route('/api/rename', methods=['POST'])
@@ -1833,19 +2048,18 @@ def api_rename():
         return jsonify({'success': False, 'error': '名称不能包含路径分隔符'})
     root = os.path.abspath(get_root())
     src = abspath(p)
-    if os.path.normcase(src) == os.path.normcase(root):
-        return jsonify({'success': False, 'error': '不能重命名根目录'})
+    if any(os.path.normcase(src) == os.path.normcase(r) for r in user_roots()):
+        return jsonify({'success': False, 'error': '不能重命名目录范围的顶层目录'})
     if not os.path.exists(src):
         return jsonify({'success': False, 'error': '文件不存在'})
     dst = os.path.join(os.path.dirname(src), nn)
-    if not _inside(dst, root):
-        return jsonify({'success': False, 'error': '目标越出根目录'})
+    if not in_scope(dst):
+        return jsonify({'success': False, 'error': '目标越出目录范围'})
     if os.path.exists(dst) and os.path.normcase(dst) != os.path.normcase(src):
         return jsonify({'success': False, 'error': '同名文件已存在'})
     try:
         os.rename(src, dst)
-        return jsonify({'success': True, 'name': nn,
-                        'path': os.path.relpath(dst, root).replace(os.sep, '/')})
+        return jsonify({'success': True, 'name': nn, 'path': rel_to_root(dst)})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
 
@@ -1853,9 +2067,14 @@ def api_rename():
 @app.route('/api/tree')
 def api_tree():
     p = request.args.get('path', '')
-    if p == '' and is_unrestricted():
-        return jsonify({'success': True, 'dirs': [{'name': d, 'path': d} for d in drive_list()]})
-    ap, root = abspath(p), os.path.abspath(get_root())
+    all_mode = request.args.get('all') == '1' and is_admin()
+    if p == '':
+        if is_unrestricted() or all_mode:
+            return jsonify({'success': True, 'dirs': [{'name': d, 'path': d} for d in drive_list()]})
+        al = root_aliases()
+        if len(al) > 1:
+            return jsonify({'success': True, 'dirs': [{'name': k, 'path': k} for k in al]})
+    ap = (os.path.abspath(p) if p else '') if all_mode else abspath(p)
     if not os.path.isdir(ap):
         return jsonify({'success': False, 'error': '不是目录', 'dirs': []})
     dirs = []
@@ -1864,7 +2083,11 @@ def api_tree():
             fp = os.path.join(ap, n)
             try:
                 if os.path.isdir(fp):
-                    dirs.append({'name': n, 'path': os.path.relpath(fp, root).replace(os.sep, '/')})
+                    # all_mode（超级用户浏览整机）保持绝对路径；
+                    # 其余交给 rel_to_root：单根→相对，多根→「别名/相对」，整机→绝对，
+                    # 避免 os.path.relpath 在跨盘符时抛 ValueError
+                    dirs.append({'name': n,
+                                 'path': fp.replace(os.sep, '/') if all_mode else rel_to_root(fp)})
             except OSError:
                 continue
     except OSError as e:
@@ -1872,16 +2095,19 @@ def api_tree():
     return jsonify({'success': True, 'dirs': dirs[:500]})
 
 
-@app.route('/api/users', methods=['GET', 'POST', 'DELETE'])
+@app.route('/api/users', methods=['GET', 'POST', 'PUT', 'DELETE'])
 def api_users():
     r = _admin_only()
     if r: return r
     d = request.get_json(silent=True) or {}
     if request.method == 'GET':
-        out = [{'name': _auth['user'], 'admin': True, 'root': _cfg['root']}]
+        out = [{'name': _auth['user'], 'admin': True, 'root': _cfg['root'],
+                'roots': [_cfg['root']] if _cfg['root'] else []}]
         for n, rec in sorted(_users.items()):
             if n == _auth['user']: continue
-            out.append({'name': n, 'admin': False, 'root': rec.get('root', '')})
+            rr = norm_roots(rec)
+            out.append({'name': n, 'admin': False,
+                        'root': rr[0] if rr else '', 'roots': rr})
         return jsonify({'success': True, 'users': out, 'file': USERS_FILE})
     name = (d.get('name') or '').strip()
     if request.method == 'DELETE':
@@ -1891,6 +2117,39 @@ def api_users():
             return jsonify({'success': False, 'error': '用户不存在'})
         _users.pop(name, None)
         return jsonify({'success': True}) if save_users() else jsonify({'success': False, 'error': '保存失败'})
+    if request.method == 'PUT':                     # 编辑用户：改名 / 改密 / 改根目录
+        rec = _users.get(name)
+        if not name or name == _auth['user'] or not rec:
+            return jsonify({'success': False, 'error': '用户不存在或不可编辑超级用户'})
+        new_name = (d.get('new_name') or name).strip()
+        if (not new_name) or '/' in new_name or '\\' in new_name or new_name == _auth['user']:
+            return jsonify({'success': False, 'error': '用户名不可用'})
+        if new_name != name and new_name in _users:
+            return jsonify({'success': False, 'error': '该用户名已存在'})
+        if d.get('roots') is None and d.get('root') is None:
+            roots = norm_roots(rec)            # 未提交目录范围 → 保持原样
+        elif isinstance(d.get('roots'), list) and not d.get('roots'):
+            roots = []                         # 显式清空 → 无任何可访问目录
+        else:
+            roots, rerr = _parse_roots(d)
+            if rerr:
+                return jsonify({'success': False, 'error': rerr})
+            if not roots:
+                roots = norm_roots(rec)        # 留空 = 保持当前目录不变
+        pw = (d.get('password') or '').strip()
+        if pw:
+            if len(pw) < 4:
+                return jsonify({'success': False, 'error': '密码至少 4 位'})
+            salt, h = _pw_hash(pw)
+        else:
+            salt, h = rec['salt'], rec['hash']
+        _users.pop(name, None)
+        _users[new_name] = {'salt': salt, 'hash': h, 'admin': False,
+                            'root': roots[0] if roots else '', 'roots': roots}
+        if not save_users():
+            return jsonify({'success': False, 'error': '保存失败，请检查程序目录写入权限'})
+        return jsonify({'success': True, 'name': new_name,
+                        'root': roots[0] if roots else '', 'roots': roots})
     pw = d.get('password') or ''
     root = (d.get('root') or '').strip()
     if not name or not pw:
@@ -1908,10 +2167,18 @@ def api_users():
         try: os.makedirs(root, exist_ok=True)
         except OSError as e: return jsonify({'success': False, 'error': f'根目录创建失败: {e}'})
     salt, h = _pw_hash(pw)
-    _users[name] = {'salt': salt, 'hash': h, 'admin': False, 'root': root}
+    roots, rerr = _parse_roots(d, root)
+    if rerr:
+        return jsonify({'success': False, 'error': rerr})
+    if not roots:
+        r0 = os.path.join(_cfg['root'] or tempfile.gettempdir(), name)
+        try: os.makedirs(r0, exist_ok=True)
+        except OSError as e: return jsonify({'success': False, 'error': f'目录创建失败: {e}'})
+        roots = [os.path.abspath(r0)]
+    _users[name] = {'salt': salt, 'hash': h, 'admin': False, 'root': roots[0], 'roots': roots}
     if not save_users():
         return jsonify({'success': False, 'error': '保存失败，请检查程序目录写入权限'})
-    return jsonify({'success': True, 'root': root})
+    return jsonify({'success': True, 'root': roots[0], 'roots': roots})
 
 
 @app.route('/api/passwd', methods=['POST'])
@@ -1942,7 +2209,8 @@ def api_list():
     p, kw = request.args.get('path',''), request.args.get('keyword','')
     sb, od = request.args.get('sort_by','name'), request.args.get('order','asc')
     ap = abspath(p)
-    if not (p == '' and is_unrestricted()) and not os.path.isdir(ap):
+    virtual = (p == '' and (is_unrestricted() or len(user_roots()) > 1))
+    if not virtual and not os.path.isdir(ap):
         return jsonify({'error':'不是目录','items':[]}), 404
     items = list_items(ap, kw, sb, od)[:PER_PAGE]
     return jsonify({'path':p, 'parent':os.path.dirname(p).replace(os.sep,'/') if p else '', 'items':items})
@@ -1956,8 +2224,8 @@ def api_del():
         ap = abspath(p)
         try:
             if not os.path.exists(ap): errors.append(f'{p}: 不存在'); continue
-            if not is_unrestricted() and ap == os.path.abspath(get_root()):
-                errors.append('不能删根目录'); continue
+            if any(os.path.normcase(ap) == os.path.normcase(r) for r in user_roots()):
+                errors.append('不能删除目录范围的顶层目录'); continue
             shutil.rmtree(ap) if os.path.isdir(ap) else os.remove(ap)
             deleted.append(p)
         except Exception as e: errors.append(f'{p}: {e}')
@@ -1980,11 +2248,33 @@ def api_batch_async():
     d = request.get_json() or {}
     paths, target, op = d.get('paths',[]), d.get('target',''), d.get('operation','copy')
     if not paths: return jsonify({'success':False,'error':'未选择'})
+    ok, srcs, at, err = _resolve_batch(paths, target, op)
+    if not ok: return jsonify({'success':False,'error':err})
     tid = str(uuid.uuid4())[:12]
-    t = threading.Thread(target=bg_batch_task,
-                         args=(tid, paths, target, op, os.path.abspath(get_root())), daemon=True)
+    t = threading.Thread(target=bg_batch_task, args=(tid, srcs, at, op), daemon=True)
     t.start()
     return jsonify({'success':True,'task_id':tid})
+
+
+def _resolve_batch(paths, target, op):
+    """把前端路径解析成绝对路径，并校验目录范围（含跨根移动限制）。"""
+    srcs = []
+    for p in paths:
+        ap = abspath(p)
+        if not ap or not in_scope(ap):
+            return False, [], '', f'路径不在你的目录范围内: {p}'
+        srcs.append(os.path.abspath(ap))
+    at = abspath(target)
+    if not at or not in_scope(at):
+        return False, [], '', '目标目录不在你的目录范围内'
+    roots = user_roots()
+    if op == 'move' and len(roots) > 1:
+        tr = next((r for r in roots if _inside(at, r)), None)
+        for s in srcs:
+            sr = next((r for r in roots if _inside(s, r)), None)
+            if sr != tr:
+                return False, [], '', '不能跨目录范围移动，请改用「复制到」再删除'
+    return True, srcs, os.path.abspath(at), ''
 
 
 @app.route('/api/batch_status/<tid>')
