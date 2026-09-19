@@ -184,23 +184,6 @@ See processes, CPU and memory usage and full command lines; search by name, PID 
 
 ## License
 
-## Disclaimer
-
-This project was written out of love. The author hopes it genuinely helps you and keeps it as reliable
-as possible, but a few things are worth saying up front:
-
-- The software is provided **"as is"**, without warranty of any kind, express or implied, including
-  merchantability, fitness for a particular purpose and non-infringement;
-- **Any consequence of using this project's code, in whole or in part, or any program built from it,
-  is the user's own to judge and bear** — the author accepts no legal liability;
-- It can read, write and delete files and execute commands: please change the default password, keep it
-  on a LAN or VPN, and make sure you are authorized to handle the data on that machine;
-- Back up anything important first. The author is glad to look into problems you report, but cannot
-  promise compensation for data loss, downtime or security incidents.
-
-If that does not match your situation, it is probably best to keep it out of production for now — and
-if you would like to talk it through, an issue is always welcome.
-
 [MIT License](LICENSE) © 2026 willdomybest — free to use, modify and redistribute, including
 commercially; just keep the copyright and license notice. This documentation and the images in
 `screenshots/` are released under the same license.
@@ -224,3 +207,20 @@ PyInstaller executable), ship their license texts with it.
 
 Issues and pull requests are welcome. By submitting a pull request you agree to license your
 contribution under the MIT License.
+
+## Disclaimer
+
+This project was written out of love. The author hopes it genuinely helps you and keeps it as reliable
+as possible, but a few things are worth saying up front:
+
+- The software is provided **"as is"**, without warranty of any kind, express or implied, including
+  merchantability, fitness for a particular purpose and non-infringement;
+- **Any consequence of using this project's code, in whole or in part, or any program built from it,
+  is the user's own to judge and bear** — the author accepts no legal liability;
+- It can read, write and delete files and execute commands: please change the default password, keep it
+  on a LAN or VPN, and make sure you are authorized to handle the data on that machine;
+- Back up anything important first. The author is glad to look into problems you report, but cannot
+  promise compensation for data loss, downtime or security incidents.
+
+If that does not match your situation, it is probably best to keep it out of production for now — and
+if you would like to talk it through, an issue is always welcome.
