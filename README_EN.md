@@ -13,12 +13,22 @@
 
 ## Quick start
 
+### Option 1: download the portable build (Windows, no Python needed)
+
+Grab `RemoteFM-v1.0.0-windows-x64.zip` from the [releases page](https://github.com/willdomybest/yueya/releases/latest),
+unzip it and double-click `RemoteFM.exe` — **no Python, no dependencies, no installer**, it just runs.
+
+> In China you can also download from [Gitee Releases](https://gitee.com/willdomybest/yueya/releases/latest).
+> On macOS / Linux use option 2 below, or build your own with `build_exe.py`.
+
+### Option 2: run from source (Windows / macOS / Linux)
+
 ```bash
 pip install flask requests pyftpdlib
 python RemoteFM.py
 ```
 
-Then open <http://127.0.0.1:8880> and log in with `admin / admin123`.
+Either way, open <http://127.0.0.1:8880> and log in with `admin / admin123`.
 
 - Skip `pyftpdlib` if you don't need FTP; the app simply disables it.
 - With [uv](https://docs.astral.sh/uv/) installed, one line is enough: `uv run RemoteFM.py`.
@@ -99,6 +109,9 @@ Local access only (e.g. behind a reverse proxy): `SD_HOST=127.0.0.1 python Remot
 | `SD_SECRET` | random each start | Session secret; fix it to keep sessions across restarts |
 
 ## Packaging a standalone executable
+
+If you don't want to build it yourself, just download the ready-made exe from the
+[releases page](https://github.com/willdomybest/yueya/releases/latest).
 
 ```bash
 python build_exe.py

@@ -13,12 +13,22 @@
 
 ## 快速开始
 
+### 方式一：下载免安装版（Windows，不需要 Python）
+
+到 [发行版页面](https://gitee.com/willdomybest/yueya/releases/latest) 下载 `RemoteFM-v1.0.0-windows-x64.zip`，
+解压后双击 `RemoteFM.exe` 就能用——**不用装 Python、不用装依赖、没有安装过程**，解压即跑。
+
+> 能访问 GitHub 的话也可以从 [GitHub Releases](https://github.com/willdomybest/yueya/releases/latest) 下载；
+> macOS / Linux 请用下面的方式二，或自行用 `build_exe.py` 打包。
+
+### 方式二：源码运行（Windows / macOS / Linux）
+
 ```bash
 pip install flask requests pyftpdlib
 python RemoteFM.py
 ```
 
-浏览器打开 <http://127.0.0.1:8880>，默认账号 `admin / admin123`。
+两种方式启动后都一样：浏览器打开 <http://127.0.0.1:8880>，默认账号 `admin / admin123`。
 
 - 不需要 FTP 功能就不装 `pyftpdlib`，程序会自动跳过。
 - 已经装了 [uv](https://docs.astral.sh/uv/) 可以一行运行：`uv run RemoteFM.py`。
@@ -99,6 +109,8 @@ SD_ROOT=/home/me/share SD_USER=me SD_PASS='换成强密码' SD_PORT=8899 SD_FTP=
 | `SD_SECRET` | 每次启动随机 | 会话密钥，固定它可让登录状态在重启后保持 |
 
 ## 打包成可执行文件
+
+不想自己打包的话，直接下载 [发行版](https://gitee.com/willdomybest/yueya/releases/latest) 里的现成 exe 即可。
 
 ```bash
 python build_exe.py
