@@ -24,7 +24,7 @@
 ### 方式二：源码运行（Windows / macOS / Linux）
 
 ```bash
-pip install flask requests pyftpdlib
+pip install flask requests pyftpdlib cryptography
 python RemoteFM.py
 ```
 
@@ -32,6 +32,9 @@ python RemoteFM.py
 用 `http://` 打开也会自动 307 跳到同端口 HTTPS；首次运行使用自签证书，浏览器提示「不安全」时点
 「高级 → 继续访问」即可（HTTPS 默认开启，可随时在配置里关掉）。
 
+- `cryptography` 用于首次启动**自动生成自签 HTTPS 证书**（默认开启 HTTPS）；不想装可以二选一：
+  在配置里把 `https.enabled` 改成 `false`，或自己提供证书路径（`https.cert` / `https.key`）。
+  注意：默认配置下**拿不到证书会拒绝启动**，而不是悄悄降级成明文 HTTP。
 - 不需要 FTP 功能就不装 `pyftpdlib`，程序会自动跳过。
 - 已经装了 [uv](https://docs.astral.sh/uv/) 可以一行运行：`uv run RemoteFM.py`。
 - 手机或局域网其他设备访问：`https://本机IP:8880`（`http://` 会自动跳转），首次运行请让防火墙放行。
@@ -77,11 +80,11 @@ python RemoteFM.py
 | --- | --- |
 | Python | **3.8 及以上**（实测 3.12.10） |
 | 操作系统 | Windows / macOS / Linux，无图形界面的服务器同样可用 |
-| 依赖 | `Flask`、`requests` 必需；`pyftpdlib` 可选，不装则不启用 FTP |
+| 依赖 | `Flask`、`requests`、`cryptography` 必需（`cryptography` 用于生成自签 HTTPS 证书）；`pyftpdlib` 可选，不装则不启用 FTP |
 | 浏览器 | Chrome / Edge / Firefox / Safari 等现代浏览器，手机浏览器也可用 |
 | 其他 | 不需要数据库、不需要 Node.js、不需要 Docker |
 
-实测组合：Windows 11 + Python 3.12.10 + Flask 3.1.3 + Werkzeug 3.1.8 + requests 2.34.2 + pyftpdlib 2.2.0。
+实测组合：Windows 11 + Python 3.12.10 + Flask 3.1.3 + Werkzeug 3.1.8 + requests 2.34.2 + pyftpdlib 2.2.0 + cryptography 46.x。
 
 ## 配置示例
 

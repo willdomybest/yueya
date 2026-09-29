@@ -24,7 +24,7 @@ unzip it and double-click `RemoteFM.exe` — **no Python, no dependencies, no in
 ### Option 2: run from source (Windows / macOS / Linux)
 
 ```bash
-pip install flask requests pyftpdlib
+pip install flask requests pyftpdlib cryptography
 python RemoteFM.py
 ```
 
@@ -32,6 +32,9 @@ Either way, open <https://127.0.0.1:8880> and log in with `admin / admin123`. Op
 307 to HTTPS on the same port; the first run uses a self-signed certificate, so accept the browser's
 "Not secure" warning (Advanced → Proceed). HTTPS is on by default and can be turned off in the config.
 
+- `cryptography` is what generates the **self-signed HTTPS certificate** on first start (HTTPS is on by default).
+  Without it, either set `https.enabled` to `false` in the config or supply your own `https.cert` / `https.key`.
+  Note: with the default config the app **refuses to start** rather than silently downgrade to plain HTTP.
 - Skip `pyftpdlib` if you don't need FTP; the app simply disables it.
 - With [uv](https://docs.astral.sh/uv/) installed, one line is enough: `uv run RemoteFM.py`.
 - To reach it from your phone or another machine, use `https://<your-lan-ip>:8880` (`http://` redirects
@@ -79,7 +82,7 @@ The login password equals full control of that machine — **change the default 
 | --- | --- |
 | Python | **3.8 or newer** (tested on 3.12.10) |
 | OS | Windows / macOS / Linux, headless servers included |
-| Dependencies | `Flask` and `requests` required; `pyftpdlib` optional (no FTP without it) |
+| Dependencies | `Flask`, `requests` and `cryptography` required (the latter generates the self-signed HTTPS certificate); `pyftpdlib` optional (no FTP without it) |
 | Browser | Any modern browser — Chrome, Edge, Firefox, Safari, or a phone browser |
 | Not needed | No database, no Node.js, no Docker |
 

@@ -36,7 +36,7 @@ APP_NAME = 'RemoteFM'
 # 打包进可执行文件的第三方组件（用于读取版本与许可证）
 PKGS = (
     'flask', 'werkzeug', 'jinja2', 'itsdangerous', 'click', 'blinker', 'markupsafe',
-    'requests', 'urllib3', 'certifi', 'charset-normalizer', 'idna', 'pyftpdlib',
+    'requests', 'urllib3', 'certifi', 'charset-normalizer', 'idna', 'pyftpdlib', 'cryptography',
 )
 LICENSE_HINTS = ('license', 'copying', 'notice', 'authors', 'copyright')
 
