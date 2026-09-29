@@ -10,13 +10,12 @@
 - 给**无头服务器、树莓派、NAS** 配一个图形界面，不用再折腾 Samba；
 - 在**手机上**管理电脑文件，躺床上也能传照片、看视频；
 - **临时给同事传文件**：发个链接或开个 FTP，对方零安装。
-- **爱的传递**：喜欢就留个星吧，给它的口粮。
 
 ## 快速开始
 
 ### 方式一：下载免安装版（Windows，不需要 Python）
 
-到 [发行版页面](https://gitee.com/willdomybest/yueya/releases/latest) 下载 `RemoteFM-v1.3.0-windows-x64.zip`，
+到 [发行版页面](https://gitee.com/willdomybest/yueya/releases/latest) 下载 `RemoteFM-v1.4.1-windows-x64.zip`，
 解压后双击 `RemoteFM.exe` 就能用——**不用装 Python、不用装依赖、没有安装过程**，解压即跑。
 
 > 能访问 GitHub 的话也可以从 [GitHub Releases](https://github.com/willdomybest/yueya/releases/latest) 下载；
@@ -84,7 +83,39 @@ python RemoteFM.py
 
 ## 配置示例
 
-全部通过环境变量配置，改完即生效，不需要配置文件。
+### 配置文件
+
+所有配置收敛在**一个** `config.json` 里（打包版在 exe 同目录，可用 `SD_CONFIG` 指定路径），首次启动自动生成，
+**每一项都带 comment 说明用法，且 comment 放在该项最后**：
+
+```json
+{
+  "comment": "RemoteFM 唯一配置文件。改完重启生效；同名环境变量优先级更高。",
+  "version": 1,
+  "encryption": {
+    "comment": "敏感项加密方式：base64（默认，种子可空）/ xor（需种子）/ hmac-sha256（需种子，带完整性校验）",
+    "type": "base64",
+    "seed": ""
+  },
+  "settings": {
+    "https":    { "enabled": {"value": false, "comment": "…"}, "cert": {…}, "key": {…} },
+    "auth":     { "admin_user": {…}, "admin_pass": {"value": {"__enc": {…}}, "comment": "…"} },
+    "ftp":      { "enabled": {…}, "user": {…}, "pass": {…}, "port": {…}, "passive_start": {…} },
+    "server":   { "host": {…}, "port": {…}, "secret": {…}, "root": {…} },
+    "files":    { "users": {…}, "token": {…}, "key": {…} },
+    "terminal": { "history_hours": {"value": 48, "comment": "远程命令接口请求记录保留时长"} }
+  }
+}
+```
+
+- **HTTPS**：把 `https.enabled` 设为 `true`，并填好证书与私钥（PEM）路径；路径无效时会打印提示并自动回退 HTTP，不会启动失败。
+- **敏感项自动加密**：管理员密码、FTP 密码、会话密钥按 `encryption` 指定的方式加密保存，磁盘上只有密文与校验值；
+  服务重启后自动解密，登录与 Token 回显都继续有效。想手工写密文，执行 `python RemoteFM.py --encrypt "新密码"` 把结果粘进去即可。
+- **环境变量优先于配置文件**：`SD_CONFIG`、`SD_HOST`、`SD_PORT`、`SD_ROOT`、`SD_USER`、`SD_PASS`、`SD_SECRET`、
+  `SD_FTP`、`SD_USERS`、`SD_TOKEN_FILE`、`SD_KEY_FILE`，适合临时覆盖而不改文件。
+- `config.json` 已加入 `.gitignore`，**不要提交**（里面有账号密码）。
+
+下面这些环境变量同样可用（优先级高于配置文件）：
 
 ### 多用户与权限
 

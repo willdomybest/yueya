@@ -12,9 +12,12 @@ Thumbs.db
 users.json
 token.json
 key.bin
+config.json
 .remotefm/
 
 # 打包产物
 build/
+build_new/
 dist/
+dist_new/
 *.spec

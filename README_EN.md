@@ -15,7 +15,7 @@
 
 ### Option 1: download the portable build (Windows, no Python needed)
 
-Grab `RemoteFM-v1.4.0-windows-x64.zip` from the [releases page](https://github.com/willdomybest/yueya/releases/latest),
+Grab `RemoteFM-v1.4.1-windows-x64.zip` from the [releases page](https://github.com/willdomybest/yueya/releases/latest),
 unzip it and double-click `RemoteFM.exe` — **no Python, no dependencies, no installer**, it just runs.
 
 > In China you can also download from [Gitee Releases](https://gitee.com/willdomybest/yueya/releases/latest).
@@ -83,7 +83,42 @@ Tested with: Windows 11 + Python 3.12.10 + Flask 3.1.3 + Werkzeug 3.1.8 + reques
 
 ## Configuration
 
-Everything is configured through environment variables — no config file, changes take effect immediately.
+### Config file
+
+Every setting lives in a **single** `config.json` (next to the exe for packaged builds, or wherever `SD_CONFIG`
+points). It is generated on first start, and **each entry carries a `comment` explaining it — placed last**:
+
+```json
+{
+  "comment": "The only RemoteFM config file. Restart to apply; environment variables win when both are set.",
+  "version": 1,
+  "encryption": {
+    "comment": "Encryption for secrets: base64 (default, empty seed ok) / xor (seed required) / hmac-sha256 (seed required, verified)",
+    "type": "base64",
+    "seed": ""
+  },
+  "settings": {
+    "https":    { "enabled": {"value": false, "comment": "…"}, "cert": {…}, "key": {…} },
+    "auth":     { "admin_user": {…}, "admin_pass": {"value": {"__enc": {…}}, "comment": "…"} },
+    "ftp":      { "enabled": {…}, "user": {…}, "pass": {…}, "port": {…}, "passive_start": {…} },
+    "server":   { "host": {…}, "port": {…}, "secret": {…}, "root": {…} },
+    "files":    { "users": {…}, "token": {…}, "key": {…} },
+    "terminal": { "history_hours": {"value": 48, "comment": "How long the remote-command API keeps requests"} }
+  }
+}
+```
+
+- **HTTPS**: set `https.enabled` to `true` and fill in the certificate / private key (PEM) paths. An invalid path
+  prints a warning and falls back to HTTP instead of failing to start.
+- **Secrets are encrypted at rest**: admin password, FTP password and session secret are stored using the
+  `encryption` settings above — the file only holds ciphertext plus a MAC, and everything is decrypted on start, so
+  logins and the token display keep working after a restart. To produce ciphertext by hand, run
+  `python RemoteFM.py --encrypt "new-password"` and paste the result.
+- **Environment variables override the file**: `SD_CONFIG`, `SD_HOST`, `SD_PORT`, `SD_ROOT`, `SD_USER`, `SD_PASS`,
+  `SD_SECRET`, `SD_FTP`, `SD_USERS`, `SD_TOKEN_FILE`, `SD_KEY_FILE`.
+- `config.json` is in `.gitignore` — **never commit it** (it holds credentials).
+
+The environment variables below are still supported (they win over the config file):
 
 ### Users and permissions
 
