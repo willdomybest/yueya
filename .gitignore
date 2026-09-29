@@ -12,7 +12,9 @@ Thumbs.db
 users.json
 token.json
 key.bin
-config.json
+RemoteFM.cfg
+remotefm_cert.pem
+remotefm_key.pem
 .remotefm/
 
 # 打包产物

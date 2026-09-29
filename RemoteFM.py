@@ -16,7 +16,7 @@ RemoteFM —— 单文件远程文件管理器（网页文件管理 + FTP + 网�
 # dependencies = ["flask>=2.0", "requests>=2.25", "pyftpdlib>=1.5.7"]
 # ///
 import os, sys, time, hmac, ssl, base64, shutil, zipfile, json, uuid, threading, logging, tempfile, subprocess, signal, queue, re, shlex, socket, hashlib, platform as sysplat
-from urllib.parse import urlparse, unquote
+from urllib.parse import urlparse, urlsplit, urlunsplit, unquote
 from flask import Flask, request, send_file, render_template_string, jsonify, Response, stream_with_context, abort, session, redirect
 from werkzeug.utils import secure_filename
 from werkzeug.exceptions import RequestEntityTooLarge
@@ -61,14 +61,14 @@ def _env_flag(name, default=True):
 
 
 # ================= 统一配置文件 =================
-# 所有配置收敛到 config.json（每个配置项都带 comment）；环境变量优先级更高，便于临时覆盖。
+# 所有配置收敛到 RemoteFM.cfg（每个配置项都带 comment）；环境变量优先级更高，便于临时覆盖。
 def _app_dir():
     if getattr(sys, 'frozen', False):
         return os.path.dirname(os.path.abspath(sys.executable))
     return os.path.dirname(os.path.abspath(__file__))
 
 
-CONFIG_FILE = os.environ.get('SD_CONFIG', '').strip() or os.path.join(_app_dir(), 'config.json')
+CONFIG_FILE = os.environ.get('SD_CONFIG', '').strip() or os.path.join(_app_dir(), 'RemoteFM.cfg')
 
 _ENC_TYPES = ('base64', 'xor', 'hmac-sha256')
 
@@ -142,9 +142,10 @@ def default_config():
         },
         'settings': {
             'https': {
-                'enabled': _item(False, '是否启用 HTTPS：true 时用证书与私钥为网页提供 HTTPS（需要下面两项路径）'),
-                'cert': _item('', 'HTTPS 证书文件路径（PEM 格式，自签证书也可以）'),
-                'key': _item('', 'HTTPS 私钥文件路径（PEM 格式）'),
+                'enabled': _item(True, '是否启用 HTTPS（默认开启）：true 时 server.port 单个端口同时提供 HTTPS 与明文 HTTP '
+                                       '307 跳转（同端口双协议，按 TLS 握手首字节识别）；设为 false 关闭为纯明文 HTTP'),
+                'cert': _item('', 'HTTPS 证书文件路径（PEM 格式）；留空则自动生成自签证书 remotefm_cert.pem'),
+                'key': _item('', 'HTTPS 私钥文件路径（PEM 格式）；留空则自动生成 remotefm_key.pem'),
             },
             'auth': {
                 'admin_user': _item('admin', '远程登录的超级管理员用户名'),
@@ -552,6 +553,32 @@ def _admin_only():
     if not is_admin():
         return jsonify({'success': False, 'error': '需要超级用户权限'}), 403
     return None
+
+
+# ================= HTTPS 强制跳转 =================
+_HTTPS_ON = False
+_HTTPS_PORT = 443
+
+
+@app.before_request
+def _force_https():
+    """兜底：明文 HTTP 请求 307 到 https://主机[:端口]/路径?查询。
+    单端口双协议模式下明文跳转在套接字层完成（见 LBServer.get_request），本钩子通常不会触发。"""
+    if not _HTTPS_ON or request.method == 'OPTIONS':
+        return
+    if request.headers.get('X-Forwarded-Proto', '').lower() == 'https':
+        return                      # 反向代理已终结 TLS
+    if request.is_secure:
+        return
+    raw = request.environ.get('RAW_URI') or ''
+    if not raw or raw.startswith('*'):
+        raw = request.path + (f'?{request.query_string.decode("utf-8", "replace")}' if request.query_string else '')
+    sp = urlsplit(raw)
+    host = urlsplit('//' + request.host).hostname or request.host
+    netloc = f'[{host}]' if ':' in str(host) else str(host)
+    if _HTTPS_PORT != 443:
+        netloc = f'{netloc}:{_HTTPS_PORT}'
+    return redirect(urlunsplit(('https', netloc, sp.path or '/', sp.query, '')), code=307)
 
 
 @app.before_request
@@ -3100,11 +3127,199 @@ def api_proc_kill():
     except Exception as e: return jsonify({'success':False,'error':str(e)})
 
 
+# ================= HTTPS 证书 =================
+def _gen_self_signed(cert_path, key_path):
+    """生成自签证书（RSA-2048；SAN 含 localhost/主机名/本机 IP），有效期 10 年。"""
+    import datetime, ipaddress
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import NameOID
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    hostname = socket.gethostname() or 'RemoteFM'
+    dns, ips = ['localhost', hostname], []
+    try:
+        for ip in socket.gethostbyname_ex(hostname)[2] or []:
+            if ip not in ips:
+                ips.append(ip)
+    except OSError:
+        pass
+    for ip in ('127.0.0.1', '::1'):
+        if ip not in ips:
+            ips.append(ip)
+    sans = [x509.DNSName(d) for d in dns] + [x509.IPAddress(ipaddress.ip_address(i)) for i in ips]
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, hostname)])
+    now = datetime.datetime.now(datetime.timezone.utc)
+    cert = (x509.CertificateBuilder()
+            .subject_name(name).issuer_name(name)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - datetime.timedelta(days=1))
+            .not_valid_after(now + datetime.timedelta(days=3650))
+            .add_extension(x509.SubjectAlternativeName(sans), critical=False)
+            .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+            .sign(key, hashes.SHA256()))
+    with open(key_path, 'wb') as f:
+        f.write(key.private_bytes(serialization.Encoding.PEM,
+                                  serialization.PrivateFormat.TraditionalOpenSSL,
+                                  serialization.NoEncryption()))
+    with open(cert_path, 'wb') as f:
+        f.write(cert.public_bytes(serialization.Encoding.PEM))
+    try:
+        os.chmod(key_path, 0o600)
+    except OSError:
+        pass
+
+
+def _ensure_https_cert(cert_path, key_path):
+    """返回可用的 (证书, 私钥) 路径；未指定或无效时复用/生成自签证书；拿不到返回 (None, None)。"""
+    if cert_path and key_path and os.path.isfile(cert_path) and os.path.isfile(key_path):
+        return cert_path, key_path
+    if cert_path or key_path:
+        print(f'[!] 指定的证书或私钥不可用（cert={cert_path or "未填"} key={key_path or "未填"}），改用自签证书')
+    gen_cert = os.path.join(_app_dir(), 'remotefm_cert.pem')
+    gen_key = os.path.join(_app_dir(), 'remotefm_key.pem')
+    if os.path.isfile(gen_cert) and os.path.isfile(gen_key):
+        print(f'[i] 使用已有自签证书: {gen_cert}')
+        return gen_cert, gen_key
+    try:
+        _gen_self_signed(gen_cert, gen_key)
+        print(f'[i] 已生成自签证书: {gen_cert}（私钥 {gen_key}）')
+        print('    浏览器会提示证书不受信任：点“高级→继续访问”，或把该证书导入系统信任即可消除提示')
+        return gen_cert, gen_key
+    except ImportError:
+        print('[!] 缺少 cryptography 组件，无法生成自签证书（pip install cryptography），请改为提供证书路径')
+    except Exception as e:
+        print(f'[!] 生成自签证书失败: {e}')
+    return None, None
+
+
 # ================= 启动 =================
+def _sock_close(sock):
+    try:
+        sock.close()
+    except OSError:
+        pass
+
+
+def _drain_close(sock):
+    """读空未读数据再关闭：MSG_PEEK 不消费请求字节，带着未读数据 close 会发 RST，
+    与刚发出的响应竞态会把客户端已收数据一并冲掉（表现为 000 / Connection reset）。"""
+    try:
+        sock.settimeout(0.5)
+        while sock.recv(4096):
+            pass
+    except OSError:
+        pass
+    _sock_close(sock)
+
+
+def _peek_head(conn, limit=16384, timeout=5):
+    """非破坏性读取请求头（MSG_PEEK，不消费数据）：返回到 \\r\\n\\r\\n（或达上限/超时/对端关闭）的原始字节。
+    注意 MSG_PEEK 下数据始终留在缓冲区，select 恒为可读，不能用于等待增长，故按时间轮询。"""
+    deadline = time.time() + timeout
+    data = b''
+    while True:
+        chunk = conn.recv(limit, socket.MSG_PEEK)
+        if not chunk:
+            return data                          # 对端已关闭
+        data = chunk
+        if b'\r\n\r\n' in data or len(data) >= limit:
+            return data                          # 常见情况：首帧即完整头部，零等待
+        if time.time() >= deadline:
+            return data                          # 头部迟迟不完整：按现状交给调用方
+        time.sleep(0.01)
+
+
+def _x_forwarded_https(head):
+    headers = head.split(b'\r\n\r\n', 1)[0]
+    return re.search(br'(?im)^x-forwarded-proto:[ \t]*https[ \t\r]*$', headers) is not None
+
+
+def _send_https_redirect(conn, head, peer_ip):
+    """按原始请求行与 Host 头拼 307 地址（同端口），路径/查询按客户端原文透传。"""
+    text = head.split(b'\r\n\r\n', 1)[0].decode('latin-1', 'replace')
+    parts = text.split('\r\n', 1)[0].split(' ')
+    target = parts[1] if len(parts) > 1 else '/'
+    if target.startswith(('http://', 'https://')):
+        sp = urlsplit(target)
+        target = sp.path or '/'
+        if sp.query:
+            target += '?' + sp.query
+    if not target.startswith('/'):
+        target = '/'
+    host = ''
+    for line in text.split('\r\n')[1:]:
+        if line[:5].lower() == 'host:':
+            host = line[5:].strip()
+            break
+    hn, port = None, None
+    if host:
+        try:
+            sp = urlsplit('//' + host)
+            hn, port = sp.hostname, sp.port
+        except ValueError:
+            hn = None
+    hn = hn or peer_ip
+    if hn in ('0.0.0.0', '::'):
+        hn = peer_ip
+    netloc = f'[{hn}]' if ':' in hn else hn
+    if (port or HTTP_PORT) != 443:
+        netloc = f'{netloc}:{port or HTTP_PORT}'
+    resp = ('HTTP/1.1 307 Temporary Redirect\r\n'
+            f'Location: https://{netloc}{target}\r\n'
+            'Connection: close\r\n'
+            'Content-Length: 0\r\n\r\n')
+    conn.sendall(resp.encode('latin-1', 'replace'))
+
+
 class LBServer(ThreadedWSGIServer):
     request_queue_size = 2048
     daemon_threads = True
     allow_reuse_address = True
+    dual_tls_ctx = None          # 非 None 时启用单端口双协议（见 get_request）
+
+    def get_request(self):
+        """单端口双协议：同一端口按首字节区分流量——0x16(TLS ClientHello) 走 HTTPS，
+        其余明文 HTTP 原地 307 跳到同端口 https，再等下一个连接。
+        注意：探测/重定向/握手都在 accept 循环内完成，死连接最多阻塞 5 秒。"""
+        conn, addr = super().get_request()
+        if self.dual_tls_ctx is None:
+            return conn, addr
+        while True:
+            try:
+                conn.settimeout(5)
+                first = conn.recv(1, socket.MSG_PEEK)
+            except OSError:
+                _sock_close(conn)
+                raise
+            if first == b'\x16':                       # TLS ClientHello → 单连接包裹
+                try:
+                    tls = self.dual_tls_ctx.wrap_socket(conn, server_side=True)
+                    tls.settimeout(None)
+                    conn.detach()                      # fd 已移交 TLS 层，断开旧引用
+                    return tls, addr
+                except OSError:                        # 握手失败（端口扫描/垃圾数据）
+                    _sock_close(conn)
+                    raise
+            if not first:                              # 对端未发数据即关闭
+                _sock_close(conn)
+                raise OSError('peer closed before sending data')
+            try:
+                head = _peek_head(conn)                # 窥探判断 XFP，不消费数据
+            except OSError:
+                _sock_close(conn)
+                raise
+            if head and _x_forwarded_https(head):      # 反代已终结 TLS，交给应用
+                conn.settimeout(None)
+                return conn, addr
+            try:
+                _send_https_redirect(conn, head, addr[0])
+            except OSError:
+                pass
+            _drain_close(conn)
+            conn, addr = super().get_request()         # 明文已服务完，继续等下一个连接
 
 
 class QH(WSGIRequestHandler):
@@ -3125,18 +3340,24 @@ if __name__ == '__main__':
     if FTP_AVAILABLE and FTP_ENABLED:
         threading.Thread(target=start_ftp_server, daemon=True).start()
 
-    https_on = _env_flag('SD_HTTPS', bool(cfg('https', 'enabled', False)))
+    https_on = _env_flag('SD_HTTPS', bool(cfg('https', 'enabled', True)))
     https_cert = _env_or_cfg('SD_HTTPS_CERT', 'https', 'cert', '')
     https_key = _env_or_cfg('SD_HTTPS_KEY', 'https', 'key', '')
-    if https_on and not (https_cert and https_key
-                         and os.path.isfile(https_cert) and os.path.isfile(https_key)):
-        print('[!] 配置要求启用 HTTPS，但证书或私钥路径无效，已回退为 HTTP（请检查配置文件的 https 一节）')
-        https_on = False
+    if https_on:
+        https_cert, https_key = _ensure_https_cert(https_cert, https_key)
+        if not https_cert:
+            print('[!] 拿不到可用证书：按安全策略拒绝降级为明文 HTTP，请解决上面的问题后重试')
+            sys.exit(1)
 
     print('=' * 60)
     print(f'配置文件: {CONFIG_FILE}')
     print(f'根目录: {get_root() or "整台计算机"}')
-    print(f'{"HTTPS" if https_on else "HTTP "} 访问:  {"https" if https_on else "http"}://{HTTP_HOST}:{HTTP_PORT}')
+    if https_on:
+        print(f'HTTPS 访问:  https://{HTTP_HOST}:{HTTP_PORT}（单端口双协议：同一端口同时应答 HTTP/HTTPS）')
+        print(f'HTTP  跳转:  http://{HTTP_HOST}:{HTTP_PORT} → 同端口 307 到 HTTPS')
+        print(f'HTTPS 证书:  {https_cert}')
+    else:
+        print(f'HTTP  访问:  http://{HTTP_HOST}:{HTTP_PORT}')
     print(f'登录账号:  {_auth["user"]} / {_auth["pass"]}')
     if _IS_DEFAULT_AUTH:
         print('[!] 正在使用默认密码 admin/admin123：能登录的人都能读写文件、执行命令，请尽快修改（改配置文件 auth.admin_pass，或用 SD_PASS 覆盖）')
@@ -3151,14 +3372,32 @@ if __name__ == '__main__':
     print(f'分片: {CHUNK_SIZE//(1024*1024)}MB  并发: 6')
     print(f'平台: {PLAT["name"]}  编码: {ENC}  命令: {len(CMDS)} 个')
     print('=' * 60)
-    srv = LBServer(HTTP_HOST, HTTP_PORT, app, handler=QH)
+    srv = None
     if https_on:
         try:
             ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             ctx.load_cert_chain(https_cert, https_key)
-            srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
-            print(f'已启用 HTTPS，浏览器请访问 https://{HTTP_HOST}:{HTTP_PORT}')
         except Exception as e:
-            print(f'[!] HTTPS 启动失败，已回退为 HTTP: {e}')
-    try: srv.serve_forever()
-    except KeyboardInterrupt: print('\n已停止'); srv.server_close()
+            print(f'[!] 加载证书失败: {e}')
+            sys.exit(1)
+        try:
+            srv = LBServer(HTTP_HOST, HTTP_PORT, app, handler=QH)
+        except OSError as e:
+            print(f'[!] 端口 {HTTP_PORT} 监听失败: {e}（端口被占用？修改 server.port）')
+            sys.exit(1)
+        srv.ssl_context = ctx       # 仅作协议标记（按 https 识别请求），监听套接字不做 TLS 包裹
+        srv.dual_tls_ctx = ctx      # 单端口双协议：TLS 握手走 HTTPS，明文原地 307
+        _HTTPS_ON, _HTTPS_PORT = True, HTTP_PORT
+        print(f'单端口双协议已启用：{HTTP_PORT} 端口同时提供 HTTPS 与明文 HTTP 307 跳转')
+    else:
+        try:
+            srv = LBServer(HTTP_HOST, HTTP_PORT, app, handler=QH)
+        except OSError as e:
+            print(f'[!] 端口 {HTTP_PORT} 监听失败: {e}（端口被占用？修改 server.port）')
+            sys.exit(1)
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        print('\n已停止')
+    finally:
+        srv.server_close()

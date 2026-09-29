@@ -15,7 +15,7 @@
 
 ### 方式一：下载免安装版（Windows，不需要 Python）
 
-到 [发行版页面](https://gitee.com/willdomybest/yueya/releases/latest) 下载 `RemoteFM-v1.4.1-windows-x64.zip`，
+到 [发行版页面](https://gitee.com/willdomybest/yueya/releases/latest) 下载 `RemoteFM-v1.4.2-windows-x64.zip`，
 解压后双击 `RemoteFM.exe` 就能用——**不用装 Python、不用装依赖、没有安装过程**，解压即跑。
 
 > 能访问 GitHub 的话也可以从 [GitHub Releases](https://github.com/willdomybest/yueya/releases/latest) 下载；
@@ -28,11 +28,13 @@ pip install flask requests pyftpdlib
 python RemoteFM.py
 ```
 
-两种方式启动后都一样：浏览器打开 <http://127.0.0.1:8880>，默认账号 `admin / admin123`。
+两种方式启动后都一样：浏览器打开 <https://127.0.0.1:8880>，默认账号 `admin / admin123`。
+用 `http://` 打开也会自动 307 跳到同端口 HTTPS；首次运行使用自签证书，浏览器提示「不安全」时点
+「高级 → 继续访问」即可（HTTPS 默认开启，可随时在配置里关掉）。
 
 - 不需要 FTP 功能就不装 `pyftpdlib`，程序会自动跳过。
 - 已经装了 [uv](https://docs.astral.sh/uv/) 可以一行运行：`uv run RemoteFM.py`。
-- 手机或局域网其他设备访问：`http://本机IP:8880`，首次运行请让防火墙放行。
+- 手机或局域网其他设备访问：`https://本机IP:8880`（`http://` 会自动跳转），首次运行请让防火墙放行。
 
 ## 你是不是也遇到过
 
@@ -48,9 +50,9 @@ python RemoteFM.py
 
 ## 为什么可以放心用
 
-- **只有一个文件**：后端、页面、前端全在 `RemoteFM.py` 里，没有配置文件、没有数据库、没有构建步骤。想读能读，想改能改。
+- **只有一个文件**：后端、页面、前端全在 `RemoteFM.py` 里，除首次启动自动生成的 `RemoteFM.cfg` 外没有数据库、没有构建步骤。想读能读，想改能改。
 - **数据不出门**：不联网上报、没有埋点、不收集任何信息，文件只在你自己和你信任的设备之间流动。
-- **30 秒起步**：装好 Python 后两条命令即可，浏览器打开 `http://127.0.0.1:8880` 就能用。
+- **30 秒起步**：装好 Python 后两条命令即可，浏览器打开 `http://127.0.0.1:8880`（自动跳转 HTTPS）就能用。
 - **旧机器也跑得动**：Windows / macOS / Linux 通吃，Python 3.8 起步，树莓派、NAS、十年前的老笔记本都不挑。
 
 ## 它能做什么
@@ -85,7 +87,7 @@ python RemoteFM.py
 
 ### 配置文件
 
-所有配置收敛在**一个** `config.json` 里（打包版在 exe 同目录，可用 `SD_CONFIG` 指定路径），首次启动自动生成，
+所有配置收敛在**一个** `RemoteFM.cfg` 里（打包版在 exe 同目录，可用 `SD_CONFIG` 指定路径），首次启动自动生成，
 **每一项都带 comment 说明用法，且 comment 放在该项最后**：
 
 ```json
@@ -98,7 +100,7 @@ python RemoteFM.py
     "seed": ""
   },
   "settings": {
-    "https":    { "enabled": {"value": false, "comment": "…"}, "cert": {…}, "key": {…} },
+    "https":    { "enabled": {"value": true, "comment": "…"}, "cert": {…}, "key": {…} },
     "auth":     { "admin_user": {…}, "admin_pass": {"value": {"__enc": {…}}, "comment": "…"} },
     "ftp":      { "enabled": {…}, "user": {…}, "pass": {…}, "port": {…}, "passive_start": {…} },
     "server":   { "host": {…}, "port": {…}, "secret": {…}, "root": {…} },
@@ -108,12 +110,17 @@ python RemoteFM.py
 }
 ```
 
-- **HTTPS**：把 `https.enabled` 设为 `true`，并填好证书与私钥（PEM）路径；路径无效时会打印提示并自动回退 HTTP，不会启动失败。
+- **HTTPS（单端口双协议，默认开启）**：`https.enabled` 默认为 `true`（设为 `false` 关闭），仅 `server.port`
+  一个端口就同时提供 HTTPS 与明文跳转——按 TLS 握手首字节自动识别协议，`https://主机:8880` 直接访问，
+  `http://主机:8880` 则原地 307 跳到**同端口** HTTPS（隧道只需映射 `server.port` 一个端口）。证书路径留空时
+  首次启动自动生成自签证书（`remotefm_cert.pem` / `remotefm_key.pem`），浏览器会提示不受信任。拿不到可用证书时
+  **拒绝启动**，绝不会悄悄降级成明文 HTTP。
 - **敏感项自动加密**：管理员密码、FTP 密码、会话密钥按 `encryption` 指定的方式加密保存，磁盘上只有密文与校验值；
   服务重启后自动解密，登录与 Token 回显都继续有效。想手工写密文，执行 `python RemoteFM.py --encrypt "新密码"` 把结果粘进去即可。
 - **环境变量优先于配置文件**：`SD_CONFIG`、`SD_HOST`、`SD_PORT`、`SD_ROOT`、`SD_USER`、`SD_PASS`、`SD_SECRET`、
-  `SD_FTP`、`SD_USERS`、`SD_TOKEN_FILE`、`SD_KEY_FILE`，适合临时覆盖而不改文件。
-- `config.json` 已加入 `.gitignore`，**不要提交**（里面有账号密码）。
+  `SD_FTP`、`SD_USERS`、`SD_TOKEN_FILE`、`SD_KEY_FILE`、`SD_HTTPS`、`SD_HTTPS_CERT`、`SD_HTTPS_KEY`，
+  适合临时覆盖而不改文件。
+- `RemoteFM.cfg` 已加入 `.gitignore`，**不要提交**（里面有账号密码）。
 
 下面这些环境变量同样可用（优先级高于配置文件）：
 
@@ -179,7 +186,8 @@ python build_exe.py
 
 - 用之前改掉默认密码，用普通用户运行，并把 `SD_ROOT` 指向需要管理的目录；
 - 只在局域网或 VPN 内使用，不要直接暴露到公网；
-- 传输默认是明文 HTTP，公网使用请放在 HTTPS 反向代理之后并加上访问控制。
+- HTTPS 已默认开启（首次运行自动生成自签证书，浏览器会提示不受信任）；对公网提供服务时请换上可信证书，
+  并置于带访问控制的反向代理之后。
 
 程序不联网上报、没有埋点，唯一的本地写入是系统临时目录中的上传分片；
 请只在自己拥有或已获授权的机器上使用，软件按 MIT 协议“原样”提供，不附带任何担保。
@@ -200,7 +208,8 @@ python build_exe.py
 
 ### FTP 直传
 
-与网页共用账号和根目录，复制链接即可粘贴到资源管理器或 FileZilla，适合几十 GB 的大文件。
+与网页共用账号和根目录，复制链接即可粘贴到资源管理器或 FileZilla（资源管理器原生支持 FTP、不支持 SFTP），
+适合几十 GB 的大文件。
 
 ![FTP](screenshots/ftp.png)
 

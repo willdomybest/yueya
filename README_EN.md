@@ -15,7 +15,7 @@
 
 ### Option 1: download the portable build (Windows, no Python needed)
 
-Grab `RemoteFM-v1.4.1-windows-x64.zip` from the [releases page](https://github.com/willdomybest/yueya/releases/latest),
+Grab `RemoteFM-v1.4.2-windows-x64.zip` from the [releases page](https://github.com/willdomybest/yueya/releases/latest),
 unzip it and double-click `RemoteFM.exe` — **no Python, no dependencies, no installer**, it just runs.
 
 > In China you can also download from [Gitee Releases](https://gitee.com/willdomybest/yueya/releases/latest).
@@ -28,11 +28,14 @@ pip install flask requests pyftpdlib
 python RemoteFM.py
 ```
 
-Either way, open <http://127.0.0.1:8880> and log in with `admin / admin123`.
+Either way, open <https://127.0.0.1:8880> and log in with `admin / admin123`. Opening `http://` gets a
+307 to HTTPS on the same port; the first run uses a self-signed certificate, so accept the browser's
+"Not secure" warning (Advanced → Proceed). HTTPS is on by default and can be turned off in the config.
 
 - Skip `pyftpdlib` if you don't need FTP; the app simply disables it.
 - With [uv](https://docs.astral.sh/uv/) installed, one line is enough: `uv run RemoteFM.py`.
-- To reach it from your phone or another machine, use `http://<your-lan-ip>:8880` and allow it through the firewall on first run.
+- To reach it from your phone or another machine, use `https://<your-lan-ip>:8880` (`http://` redirects
+  automatically) and allow it through the firewall on first run.
 
 ## You have probably been here
 
@@ -48,9 +51,10 @@ Open a browser and you are looking at that computer's files. Upload, download, p
 
 ## Why you can relax with it
 
-- **A single file.** Backend, pages and front-end all live in `RemoteFM.py` — no config file, no database, no build step. Read it, fork it, change it.
+- **A single file.** Backend, pages and front-end all live in `RemoteFM.py` — aside from the
+  `RemoteFM.cfg` generated on first start, there is no database and no build step. Read it, fork it, change it.
 - **Your data stays yours.** No telemetry, no analytics, nothing collected: files only travel between your own devices.
-- **Running in 30 seconds.** Two commands after installing Python, then open `http://127.0.0.1:8880`.
+- **Running in 30 seconds.** Two commands after installing Python, then open `http://127.0.0.1:8880` (it redirects to HTTPS).
 - **Happy on old hardware.** Windows / macOS / Linux, Python 3.8+, at home on a Raspberry Pi, a NAS or a ten-year-old laptop.
 
 ## What it does
@@ -85,7 +89,7 @@ Tested with: Windows 11 + Python 3.12.10 + Flask 3.1.3 + Werkzeug 3.1.8 + reques
 
 ### Config file
 
-Every setting lives in a **single** `config.json` (next to the exe for packaged builds, or wherever `SD_CONFIG`
+Every setting lives in a **single** `RemoteFM.cfg` (next to the exe for packaged builds, or wherever `SD_CONFIG`
 points). It is generated on first start, and **each entry carries a `comment` explaining it — placed last**:
 
 ```json
@@ -98,7 +102,7 @@ points). It is generated on first start, and **each entry carries a `comment` ex
     "seed": ""
   },
   "settings": {
-    "https":    { "enabled": {"value": false, "comment": "…"}, "cert": {…}, "key": {…} },
+    "https":    { "enabled": {"value": true, "comment": "…"}, "cert": {…}, "key": {…} },
     "auth":     { "admin_user": {…}, "admin_pass": {"value": {"__enc": {…}}, "comment": "…"} },
     "ftp":      { "enabled": {…}, "user": {…}, "pass": {…}, "port": {…}, "passive_start": {…} },
     "server":   { "host": {…}, "port": {…}, "secret": {…}, "root": {…} },
@@ -108,15 +112,21 @@ points). It is generated on first start, and **each entry carries a `comment` ex
 }
 ```
 
-- **HTTPS**: set `https.enabled` to `true` and fill in the certificate / private key (PEM) paths. An invalid path
-  prints a warning and falls back to HTTP instead of failing to start.
+- **HTTPS (single-port dual protocol, on by default)**: `https.enabled` defaults to `true` (set `false` to opt
+  out), and `server.port` alone serves both HTTPS and the plain-HTTP redirect — the first TLS handshake byte
+  picks the protocol, so `https://host:8880` works directly while `http://host:8880` gets a 307 to the
+  **same port** over HTTPS (a tunnel only needs to map `server.port`). With no certificate paths given, a
+  self-signed pair (`remotefm_cert.pem` / `remotefm_key.pem`) is generated on first start — browsers warn
+  that it is untrusted. If no usable certificate can be obtained the program **refuses to start** instead of
+  silently downgrading to plain HTTP.
 - **Secrets are encrypted at rest**: admin password, FTP password and session secret are stored using the
   `encryption` settings above — the file only holds ciphertext plus a MAC, and everything is decrypted on start, so
   logins and the token display keep working after a restart. To produce ciphertext by hand, run
   `python RemoteFM.py --encrypt "new-password"` and paste the result.
 - **Environment variables override the file**: `SD_CONFIG`, `SD_HOST`, `SD_PORT`, `SD_ROOT`, `SD_USER`, `SD_PASS`,
-  `SD_SECRET`, `SD_FTP`, `SD_USERS`, `SD_TOKEN_FILE`, `SD_KEY_FILE`.
-- `config.json` is in `.gitignore` — **never commit it** (it holds credentials).
+  `SD_SECRET`, `SD_FTP`, `SD_USERS`, `SD_TOKEN_FILE`, `SD_KEY_FILE`, `SD_HTTPS`, `SD_HTTPS_CERT`,
+  `SD_HTTPS_KEY`.
+- `RemoteFM.cfg` is in `.gitignore` — **never commit it** (it holds credentials).
 
 The environment variables below are still supported (they win over the config file):
 
@@ -187,7 +197,8 @@ delete files and execute commands.
 
 - Change the default password, run it as a normal user, and point `SD_ROOT` at the directory you actually want to manage;
 - Keep it on a LAN or VPN; do not expose it directly to the internet;
-- Traffic is plain HTTP by default — put it behind an HTTPS reverse proxy with access control if it must be public.
+- HTTPS is on by default with a self-signed certificate (browsers warn it is untrusted). For public
+  exposure use a trusted certificate and put the service behind an access-controlled reverse proxy.
 
 The app collects nothing, has no telemetry, and only writes chunk files to the system temp
 directory. Use it only on machines you own or are authorized to manage. The software is
@@ -209,7 +220,8 @@ Browse, search, sort, multi-select; copy / move / delete / create folders; ZIP c
 
 ### FTP
 
-Shares the account and root directory with the web UI — paste the link into Explorer or FileZilla; made for very large files.
+Shares the account and root directory with the web UI — paste the link into Explorer or FileZilla
+(Explorer supports FTP natively; SFTP needs a third-party client); made for very large files.
 
 ![FTP](screenshots/ftp.png)
 
