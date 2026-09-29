@@ -15,7 +15,7 @@ RemoteFM —— 单文件远程文件管理器（网页文件管理 + FTP + 网�
 # requires-python = ">=3.8"
 # dependencies = ["flask>=2.0", "requests>=2.25", "pyftpdlib>=1.5.7"]
 # ///
-import os, sys, time, hmac, shutil, zipfile, json, uuid, threading, logging, tempfile, subprocess, signal, queue, re, shlex, socket, hashlib, platform as sysplat
+import os, sys, time, hmac, ssl, base64, shutil, zipfile, json, uuid, threading, logging, tempfile, subprocess, signal, queue, re, shlex, socket, hashlib, platform as sysplat
 from urllib.parse import urlparse, unquote
 from flask import Flask, request, send_file, render_template_string, jsonify, Response, stream_with_context, abort, session, redirect
 from werkzeug.utils import secure_filename
@@ -60,25 +60,236 @@ def _env_flag(name, default=True):
     return v.strip().lower() not in ('0', 'false', 'no', 'off')
 
 
-HTTP_HOST = os.environ.get('SD_HOST', '0.0.0.0')
-HTTP_PORT = _env_int('SD_PORT', 8880)
+# ================= 统一配置文件 =================
+# 所有配置收敛到 config.json（每个配置项都带 comment）；环境变量优先级更高，便于临时覆盖。
+def _app_dir():
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+CONFIG_FILE = os.environ.get('SD_CONFIG', '').strip() or os.path.join(_app_dir(), 'config.json')
+
+_ENC_TYPES = ('base64', 'xor', 'hmac-sha256')
+
+
+def _enc_stream(seed, size):
+    out = bytearray()
+    key = hashlib.sha256(str(seed).encode('utf-8')).digest()
+    for i in range(0, size, 32):
+        out += hmac.new(key, i.to_bytes(8, 'big'), hashlib.sha256).digest()
+    return bytes(out[:size])
+
+
+def enc_text(text, mode='base64', seed=''):
+    """按指定类型加密敏感配置项。base64 允许空种子；xor / hmac-sha256 必须给种子。"""
+    mode = (mode or 'base64').strip().lower()
+    data = str(text).encode('utf-8')
+    if mode == 'base64':
+        return {'__enc': {'type': 'base64', 'seed': '', 'data': base64.b64encode(data).decode('ascii')}}
+    if mode not in _ENC_TYPES:
+        mode = 'base64'
+    if mode == 'xor':
+        ct = bytes(a ^ b for a, b in zip(data, _enc_stream(seed, len(data))))
+        return {'__enc': {'type': 'xor', 'seed': seed, 'data': ct.hex()}}
+    ct = bytes(a ^ b for a, b in zip(data, _enc_stream(seed, len(data))))
+    mac = hmac.new(hashlib.sha256(str(seed).encode('utf-8')).digest(), ct, hashlib.sha256).hexdigest()
+    return {'__enc': {'type': 'hmac-sha256', 'seed': seed, 'data': ct.hex(), 'mac': mac}}
+
+
+def dec_text(val):
+    """把配置项的值还原成明文；遇到不认识的格式就原样返回。"""
+    if not isinstance(val, dict) or '__enc' not in val:
+        return val
+    e = val.get('__enc') or {}
+    t, seed, data = (e.get('type') or 'base64').lower(), e.get('seed') or '', e.get('data') or ''
+    try:
+        if t == 'base64':
+            return base64.b64decode(data.encode('ascii')).decode('utf-8')
+        raw = bytes.fromhex(data)
+        if t == 'hmac-sha256':
+            mac = hmac.new(hashlib.sha256(str(seed).encode('utf-8')).digest(), raw, hashlib.sha256).hexdigest()
+            if not hmac.compare_digest(mac, e.get('mac') or ''):
+                logging.warning('配置项解密失败：种子或内容已被修改')
+                return ''
+        return bytes(a ^ b for a, b in zip(raw, _enc_stream(seed, len(raw)))).decode('utf-8')
+    except Exception as e2:
+        logging.warning('配置项解析失败: %s', e2)
+        return ''
+
+
+def _item(value, comment):
+    return {'value': value, 'comment': comment}
+
+
+# 需要加密落盘的配置项（内部维护，不写进配置文件）
+SENSITIVE = {('auth', 'admin_pass'), ('ftp', 'pass'), ('server', 'secret')}
+
+
+def is_sensitive(group, key):
+    return (group, key) in SENSITIVE
+
+
+def default_config():
+    return {
+        'comment': 'RemoteFM 唯一配置文件。改完重启生效；同名环境变量优先级更高（便于临时覆盖）。'
+                   '管理员密码、FTP 密码、会话密钥这几项会按 encryption 指定的方式加密保存。',
+        'version': 1,
+        'encryption': {
+            'comment': '敏感项的加密方式：type 可选 base64（默认，种子可空）/ xor（需种子）/ hmac-sha256（需种子，带完整性校验）；seed 即加密种子，改种子会导致已加密内容无法解开。',
+            'type': 'base64',
+            'seed': '',
+        },
+        'settings': {
+            'https': {
+                'enabled': _item(False, '是否启用 HTTPS：true 时用证书与私钥为网页提供 HTTPS（需要下面两项路径）'),
+                'cert': _item('', 'HTTPS 证书文件路径（PEM 格式，自签证书也可以）'),
+                'key': _item('', 'HTTPS 私钥文件路径（PEM 格式）'),
+            },
+            'auth': {
+                'admin_user': _item('admin', '远程登录的超级管理员用户名'),
+                'admin_pass': _item('admin123', '超级管理员密码；按 encryption 配置的加密方式保存'),
+            },
+            'ftp': {
+                'enabled': _item(True, '是否启用 FTP 服务'),
+                'user': _item('admin', 'FTP 登录用户名；留空则与超级管理员同名'),
+                'pass': _item('admin123', 'FTP 登录密码；按 encryption 配置的加密方式保存'),
+                'port': _item(2121, 'FTP 端口'),
+                'passive_start': _item(60000, 'FTP 被动端口起始值（连续 50 个）'),
+            },
+            'server': {
+                'host': _item('0.0.0.0', '网页监听地址；改成 127.0.0.1 则只允许本机访问'),
+                'port': _item(8880, '网页端口'),
+                'secret': _item('', '会话密钥，同时用作落盘加密密钥；留空则每次启动随机（登录状态不保持）'),
+                'root': _item(os.path.abspath('D:/') if os.name == 'nt' else os.path.expanduser('~'),
+                              '被管理的根目录；把它改成空字符串则表示可访问整台计算机'),
+            },
+            'files': {
+                'users': _item('', '用户数据文件 users.json 的路径；留空则与配置文件同目录'),
+                'token': _item('', '远程命令接口 Token 文件路径；留空则与配置文件同目录'),
+                'key': _item('', '落盘加密密钥文件 key.bin 的路径；留空则与配置文件同目录'),
+            },
+            'terminal': {
+                'history_hours': _item(48, '远程命令接口保留的请求记录时长（小时）'),
+            },
+        },
+    }
+
+
+_cfg_file = {}
+
+
+def load_config():
+    """读取配置；文件不存在时写出一份带注释的默认配置。"""
+    global _cfg_file
+    try:
+        with open(CONFIG_FILE, encoding='utf-8') as f:
+            _cfg_file = json.load(f)
+    except (OSError, ValueError):
+        _cfg_file = {}
+    dft = default_config()
+    if _cfg_file.get('version') != dft['version'] or 'settings' not in _cfg_file:
+        _cfg_file = dft
+        save_config()
+    else:      # 补齐新增配置项，保留用户已有内容
+        changed = False
+        for group, items in dft['settings'].items():
+            for k, v in items.items():
+                if k not in _cfg_file['settings'].setdefault(group, {}):
+                    _cfg_file['settings'][group][k] = v
+                    changed = True
+        if 'encryption' not in _cfg_file:
+            _cfg_file['encryption'] = dft['encryption']
+            changed = True
+        for gname, group in (_cfg_file.get('settings') or {}).items():
+            for k, item in (group or {}).items():
+                if isinstance(item, dict) and item.pop('sensitive', None) is not None:
+                    changed = True
+        if changed:
+            save_config()
+    return _cfg_file
+
+
+def save_config():
+    """写回配置：敏感项自动按 encryption 指定的方式加密落盘。"""
+    enc = _cfg_file.get('encryption') or {}
+    out = json.loads(json.dumps(_cfg_file, ensure_ascii=False))
+    for gname, group in (out.get('settings') or {}).items():
+        for k, item in (group or {}).items():
+            if not isinstance(item, dict):
+                continue
+            item.pop('sensitive', None)        # 内部字段，不写给用户看
+            if is_sensitive(gname, k):
+                v = item.get('value')
+                if not (isinstance(v, dict) and '__enc' in v):
+                    item['value'] = enc_text(v, enc.get('type') or 'base64', enc.get('seed') or '')
+            # 保持「value 在前、comment 在后」的顺序
+            ordered = {}
+            if 'value' in item:
+                ordered['value'] = item['value']
+            if 'comment' in item:
+                ordered['comment'] = item['comment']
+            for kk, vv in item.items():
+                if kk not in ordered:
+                    ordered[kk] = vv
+            group[k] = ordered
+    try:
+        os.makedirs(os.path.dirname(CONFIG_FILE) or '.', exist_ok=True)
+        with open(CONFIG_FILE + '.tmp', 'w', encoding='utf-8') as f:
+            json.dump(out, f, ensure_ascii=False, indent=2)
+        os.replace(CONFIG_FILE + '.tmp', CONFIG_FILE)
+        return True
+    except OSError as e:
+        logging.warning('写入配置文件失败: %s', e)
+        return False
+
+
+def cfg(group, key, default=None, encrypt_out=False):
+    """取配置项的值（敏感项自动解密）；encrypt_out=True 时返回待写入的加密结构。"""
+    item = ((_cfg_file.get('settings') or {}).get(group) or {}).get(key)
+    if item is None:
+        return default
+    val = item.get('value') if isinstance(item, dict) else item
+    if isinstance(val, dict) and '__enc' in val:
+        return val if encrypt_out else dec_text(val)
+    if encrypt_out and is_sensitive(group, key):
+        enc = _cfg_file.get('encryption') or {}
+        return enc_text(val, enc.get('type') or 'base64', enc.get('seed') or '')
+    return val
+
+
+load_config()
+
+
+def _env_or_cfg(name, group, key, default=None):
+    """环境变量优先，其次配置文件（便于临时覆盖）。"""
+    if name and name in os.environ and os.environ[name].strip() != '':
+        return os.environ[name].strip()
+    v = cfg(group, key, default)
+    return default if v is None or v == '' else v
+
+
+HTTP_HOST = _env_or_cfg('SD_HOST', 'server', 'host', '0.0.0.0')
+HTTP_PORT = _env_int('SD_PORT', int(cfg('server', 'port', 8880) or 8880))
 
 # ================= 默认根目录：Windows 为 D 盘，其他系统为用户主目录 =================
-if 'SD_ROOT' in os.environ:                 # 显式设置时以它为准，留空 = 整台计算机
-    _root_env = os.environ.get('SD_ROOT', '').strip()
-    _default_root = os.path.abspath(_root_env) if _root_env else ''
-elif os.name == 'nt':
-    _default_root = os.path.abspath('D:/')
-else:
-    _default_root = os.path.expanduser('~')
+_root_env = os.environ.get('SD_ROOT')
+if _root_env is None:
+    _root_env = cfg('server', 'root', default_config()['settings']['server']['root']['value'])
+_root_env = str(_root_env or '').strip()
+_default_root = os.path.abspath(_root_env) if _root_env else ''
 _cfg = {'root': _default_root}
 
 # ================= 用户与认证（超级用户 + 普通用户） =================
 _auth = {
-    'user': os.environ.get('SD_USER', 'admin'),
-    'pass': os.environ.get('SD_PASS', 'admin123'),
+    'user': _env_or_cfg('SD_USER', 'auth', 'admin_user', 'admin'),
+    'pass': _env_or_cfg('SD_PASS', 'auth', 'admin_pass', 'admin123'),
 }
 _IS_DEFAULT_AUTH = (_auth['user'] == 'admin' and _auth['pass'] == 'admin123')
+
+# FTP 账号（默认与超级管理员一致，可在配置文件中单独设置）
+FTP_USER = _env_or_cfg('SD_FTP_USER', 'ftp', 'user', _auth['user']) or _auth['user']
+FTP_PASS = _env_or_cfg('SD_FTP_PASS', 'ftp', 'pass', _auth['pass']) or _auth['pass']
 
 
 def _app_dir():
@@ -91,7 +302,7 @@ def _app_dir():
 def _pick_users_file():
     """用户存储位置：SD_USERS > 程序目录 > 用户主目录 > 临时目录。"""
     cands = []
-    env = os.environ.get('SD_USERS', '').strip()
+    env = os.environ.get('SD_USERS', '').strip() or str(cfg('files', 'users', '') or '').strip()
     if env:
         cands.append(os.path.abspath(env))
     cands.append(os.path.join(_app_dir(), 'users.json'))
@@ -108,8 +319,10 @@ def _pick_users_file():
 
 
 USERS_FILE = _pick_users_file()
-TOKEN_FILE = os.environ.get('SD_TOKEN_FILE', '').strip() or os.path.join(os.path.dirname(USERS_FILE), 'token.json')
-KEY_FILE = os.environ.get('SD_KEY_FILE', '').strip() or os.path.join(os.path.dirname(USERS_FILE), 'key.bin')
+TOKEN_FILE = (os.environ.get('SD_TOKEN_FILE', '').strip() or str(cfg('files', 'token', '') or '').strip()
+              or os.path.join(os.path.dirname(USERS_FILE), 'token.json'))
+KEY_FILE = (os.environ.get('SD_KEY_FILE', '').strip() or str(cfg('files', 'key', '') or '').strip()
+            or os.path.join(os.path.dirname(USERS_FILE), 'key.bin'))
 _users_lock = threading.Lock()
 _users = {}          # name -> {'salt','hash','admin','root'}
 
@@ -123,7 +336,7 @@ def _pw_hash(pw, salt=None):
 # 密钥优先取 SD_SECRET / SD_KEY；否则在程序目录生成 key.bin（32 字节随机，权限 600）。
 # 算法：HMAC-SHA256 作为 PRF 生成密钥流（CTR 结构）异或明文，再做 encrypt-then-MAC 校验。
 def _load_key():
-    env = (os.environ.get('SD_SECRET') or os.environ.get('SD_KEY') or '').strip()
+    env = (os.environ.get('SD_SECRET') or os.environ.get('SD_KEY') or cfg('server', 'secret', '') or '').strip()
     if env:
         return hashlib.sha256(('remotefm-key:' + env).encode('utf-8')).digest()
     try:
@@ -269,9 +482,9 @@ def is_admin():
 load_users()
 
 # ================= FTP 服务器 =================
-FTP_ENABLED = _env_flag('SD_FTP', True)
-FTP_PORT = _env_int('SD_FTP_PORT', 2121)
-_ftp_pasv_start = _env_int('SD_FTP_PASSIVE_START', 60000)
+FTP_ENABLED = _env_flag('SD_FTP', bool(cfg('ftp', 'enabled', True)))
+FTP_PORT = _env_int('SD_FTP_PORT', int(cfg('ftp', 'port', 2121) or 2121))
+_ftp_pasv_start = _env_int('SD_FTP_PASSIVE_START', int(cfg('ftp', 'passive_start', 60000) or 60000))
 FTP_PASSIVE_PORTS = range(_ftp_pasv_start, _ftp_pasv_start + 50)
 
 CHUNK_DIR = os.path.join(tempfile.gettempdir(), 'sc')
@@ -380,10 +593,6 @@ body{font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;backgroun
 .btn{width:100%;padding:12px;background:#4a6cf7;color:#fff;border:0;border-radius:6px;font-size:15px;font-weight:500;cursor:pointer;transition:.15s;margin-top:4px;font-family:inherit}
 .btn:hover{background:#3a5ce0}
 .btn:active{transform:translateY(1px)}
-.tip{background:#fff9e6;border:1px solid #ffe08a;padding:14px 16px;border-radius:8px;font-size:13px;color:#8a6d00;line-height:1.9;margin-top:22px}
-.tip .t-title{font-weight:600;color:#664e00;display:block;margin-bottom:6px;font-size:13px}
-.tip code{background:rgba(0,0,0,.08);padding:2px 7px;border-radius:4px;font-family:Consolas,Monaco,monospace;color:#664e00;font-size:12.5px;user-select:all}
-.tip .row{margin:3px 0}
 .error{background:#fdeceb;border:1px solid #fcc;color:#c0392b;padding:11px 14px;border-radius:6px;font-size:13px;margin-bottom:16px;text-align:center}
 </style></head><body>
 <div class="card">
@@ -395,14 +604,6 @@ body{font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;backgroun
     <div class="field"><label>密码</label><input name="password" type="password" value="{{ prefill_pass }}" autocomplete="current-password"></div>
     <button class="btn" type="submit">登 录</button>
   </form>
-  {% if is_default %}
-  <div class="tip">
-    <span class="t-title">💡 首次使用 · 默认账号</span>
-    <div class="row">用户名：<code>{{ default_user }}</code></div>
-    <div class="row">密　码：<code>{{ default_pass }}</code></div>
-    <div class="row" style="margin-top:8px;font-size:12px;color:#a06000">登录后请尽快修改密码（编辑 <code>_auth</code> 或设置 <code>SD_USER</code>/<code>SD_PASS</code> 环境变量）</div>
-  </div>
-  {% endif %}
 </div>
 </body></html>'''
 
@@ -412,13 +613,7 @@ def login():
     if session.get('logged_in'):
         return redirect('/')
     if request.method == 'GET':
-        return render_template_string(
-            LOGIN_PAGE, error='',
-            prefill_user=_auth['user'] if _IS_DEFAULT_AUTH else '',
-            prefill_pass=_auth['pass'] if _IS_DEFAULT_AUTH else '',
-            is_default=_IS_DEFAULT_AUTH,
-            default_user=_auth['user'], default_pass=_auth['pass'],
-        )
+        return render_template_string(LOGIN_PAGE, error='', prefill_user='', prefill_pass='')
     u = (request.form.get('username') or '').strip()
     p = request.form.get('password') or ''
     if _check_auth(u, p):
@@ -429,8 +624,6 @@ def login():
     return render_template_string(
         LOGIN_PAGE, error='❌ 用户名或密码错误',
         prefill_user=u, prefill_pass='',
-        is_default=_IS_DEFAULT_AUTH,
-        default_user=_auth['user'], default_pass=_auth['pass'],
     )
 
 
@@ -802,7 +995,7 @@ def start_ftp_server():
         print('[FTP] pyftpdlib 未安装，跳过。安装: pip install pyftpdlib')
         return
     authorizer = DummyAuthorizer()
-    authorizer.add_user(_auth['user'], _auth['pass'], get_root(), perm='elradfmwMT')
+    authorizer.add_user(FTP_USER, FTP_PASS, get_root(), perm='elradfmwMT')
 
     class Handler(FTPHandler):
         filesystem = DynamicFS
@@ -816,7 +1009,7 @@ def start_ftp_server():
         server = FTPServer((HTTP_HOST, FTP_PORT), Handler)
         server.max_cons = 100
         server.max_cons_per_ip = 20
-        print(f'[FTP] 已启动: ftp://{HTTP_HOST}:{FTP_PORT}  账号: {_auth["user"]} / {_auth["pass"]}')
+        print(f'[FTP] 已启动: ftp://{HTTP_HOST}:{FTP_PORT}  账号: {FTP_USER} / {FTP_PASS}')
         server.serve_forever()
     except Exception as e:
         print(f'[FTP] 启动失败: {e}')
@@ -2178,8 +2371,8 @@ def api_ftp_info():
         'enabled': FTP_AVAILABLE,
         'host': get_local_ip(),
         'port': FTP_PORT,
-        'user': _auth['user'],
-        'pass': _auth['pass'],
+        'user': FTP_USER,
+        'pass': FTP_PASS,
         'passive_ports': f'{FTP_PASSIVE_PORTS.start}-{FTP_PASSIVE_PORTS.stop-1}',
     })
 
@@ -2619,7 +2812,7 @@ def dl_to_local():
 _token = {'enabled': False, 'value': '', 'created': 0, 'salt': '', 'hash': ''}
 REQ_LOG = []
 REQ_LOG_MAX = 500
-REQ_LOG_HOURS = 48
+REQ_LOG_HOURS = int(cfg('terminal', 'history_hours', 48) or 48)
 
 
 def _load_token():
@@ -2921,26 +3114,51 @@ class QH(WSGIRequestHandler):
 
 
 if __name__ == '__main__':
+    if len(sys.argv) > 2 and sys.argv[1] == '--encrypt':
+        # 用法：python RemoteFM.py --encrypt "要加密的密码"
+        # 按配置文件的 encryption.type / seed 生成密文，粘贴到对应配置项即可。
+        _enc_cfg = _cfg_file.get('encryption') or {}
+        print(json.dumps(enc_text(sys.argv[2], _enc_cfg.get('type') or 'base64',
+                                  _enc_cfg.get('seed') or ''), ensure_ascii=False))
+        sys.exit(0)
+
     if FTP_AVAILABLE and FTP_ENABLED:
         threading.Thread(target=start_ftp_server, daemon=True).start()
 
+    https_on = _env_flag('SD_HTTPS', bool(cfg('https', 'enabled', False)))
+    https_cert = _env_or_cfg('SD_HTTPS_CERT', 'https', 'cert', '')
+    https_key = _env_or_cfg('SD_HTTPS_KEY', 'https', 'key', '')
+    if https_on and not (https_cert and https_key
+                         and os.path.isfile(https_cert) and os.path.isfile(https_key)):
+        print('[!] 配置要求启用 HTTPS，但证书或私钥路径无效，已回退为 HTTP（请检查配置文件的 https 一节）')
+        https_on = False
+
     print('=' * 60)
-    print(f'根目录: {get_root()}')
-    print(f'HTTP 访问:  http://{HTTP_HOST}:{HTTP_PORT}')
+    print(f'配置文件: {CONFIG_FILE}')
+    print(f'根目录: {get_root() or "整台计算机"}')
+    print(f'{"HTTPS" if https_on else "HTTP "} 访问:  {"https" if https_on else "http"}://{HTTP_HOST}:{HTTP_PORT}')
     print(f'登录账号:  {_auth["user"]} / {_auth["pass"]}')
     if _IS_DEFAULT_AUTH:
-        print('[!] 正在使用默认密码 admin/admin123：能登录的人都能读写文件、执行命令，请尽快修改（设置 SD_USER / SD_PASS 环境变量）')
+        print('[!] 正在使用默认密码 admin/admin123：能登录的人都能读写文件、执行命令，请尽快修改（改配置文件 auth.admin_pass，或用 SD_PASS 覆盖）')
     if FTP_AVAILABLE and FTP_ENABLED:
         print(f'FTP  访问:  ftp://{HTTP_HOST}:{FTP_PORT}')
-        print(f'FTP  账号:  {_auth["user"]} / {_auth["pass"]}   (与网页共用)')
+        print(f'FTP  账号:  {FTP_USER} / {FTP_PASS}')
         print(f'FTP  被动端口: {FTP_PASSIVE_PORTS.start}-{FTP_PASSIVE_PORTS.stop-1}')
     elif not FTP_ENABLED:
-        print('FTP  未启用（SD_FTP=0）')
+        print('FTP  未启用（配置项 ftp.enabled=false）')
     else:
         print(f'FTP  未启用（安装: pip install pyftpdlib）')
     print(f'分片: {CHUNK_SIZE//(1024*1024)}MB  并发: 6')
     print(f'平台: {PLAT["name"]}  编码: {ENC}  命令: {len(CMDS)} 个')
     print('=' * 60)
     srv = LBServer(HTTP_HOST, HTTP_PORT, app, handler=QH)
+    if https_on:
+        try:
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ctx.load_cert_chain(https_cert, https_key)
+            srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+            print(f'已启用 HTTPS，浏览器请访问 https://{HTTP_HOST}:{HTTP_PORT}')
+        except Exception as e:
+            print(f'[!] HTTPS 启动失败，已回退为 HTTP: {e}')
     try: srv.serve_forever()
     except KeyboardInterrupt: print('\n已停止'); srv.server_close()
