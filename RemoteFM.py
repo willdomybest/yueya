@@ -15,7 +15,7 @@ RemoteFM —— 单文件远程文件管理器（网页文件管理 + FTP + 网�
 # requires-python = ">=3.8"
 # dependencies = ["flask>=2.0", "requests>=2.25", "pyftpdlib>=1.5.7"]
 # ///
-import os, sys, time, hmac, ssl, base64, shutil, zipfile, json, uuid, threading, logging, tempfile, subprocess, signal, queue, re, shlex, socket, hashlib, platform as sysplat
+import os, sys, time, ipaddress, hmac, ssl, base64, shutil, zipfile, json, uuid, threading, logging, tempfile, subprocess, signal, queue, re, shlex, socket, hashlib, platform as sysplat
 from urllib.parse import urlparse, urlsplit, urlunsplit, unquote
 from flask import Flask, request, send_file, render_template_string, jsonify, Response, stream_with_context, abort, session, redirect
 from werkzeug.utils import secure_filename
@@ -575,10 +575,13 @@ def _force_https():
         raw = request.path + (f'?{request.query_string.decode("utf-8", "replace")}' if request.query_string else '')
     sp = urlsplit(raw)
     host = urlsplit('//' + request.host).hostname or request.host
-    netloc = f'[{host}]' if ':' in str(host) else str(host)
-    if _HTTPS_PORT != 443:
-        netloc = f'{netloc}:{_HTTPS_PORT}'
-    return redirect(urlunsplit(('https', netloc, sp.path or '/', sp.query, '')), code=307)
+    try:
+        ipaddress.ip_address(urlsplit(f"//{s}").hostname);
+        netloc = f'[{host}]' if ':' in str(host) else str(host)
+        if _HTTPS_PORT != 443:
+            netloc = f'{netloc}:{_HTTPS_PORT}'
+        return redirect(urlunsplit(('https', netloc, sp.path or '/', sp.query, '')), code=307)
+    except ValueError: return
 
 
 @app.before_request
@@ -3130,7 +3133,7 @@ def api_proc_kill():
 # ================= HTTPS 证书 =================
 def _gen_self_signed(cert_path, key_path):
     """生成自签证书（RSA-2048；SAN 含 localhost/主机名/本机 IP），有效期 10 年。"""
-    import datetime, ipaddress
+    import datetime
     from cryptography import x509
     from cryptography.hazmat.primitives import hashes, serialization
     from cryptography.hazmat.primitives.asymmetric import rsa
@@ -3266,7 +3269,8 @@ def _send_https_redirect(conn, head, peer_ip):
         hn = peer_ip
     netloc = f'[{hn}]' if ':' in hn else hn
     if (port or HTTP_PORT) != 443:
-        netloc = f'{netloc}:{port or HTTP_PORT}'
+        try: ipaddress.ip_address(sp.hostname); netloc = f'{netloc}:{port or HTTP_PORT}'
+        except ValueError: netloc = f'{netloc}'
     resp = ('HTTP/1.1 307 Temporary Redirect\r\n'
             f'Location: https://{netloc}{target}\r\n'
             'Connection: close\r\n'
