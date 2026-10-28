@@ -16,7 +16,7 @@ RemoteFM —— 单文件远程文件管理器（网页文件管理 + FTP + 网�
 # dependencies = ["flask>=2.0", "requests>=2.25", "pyftpdlib>=1.5.7"]
 # ///
 import os, sys, time, ipaddress, hmac, ssl, base64, shutil, zipfile, json, uuid, threading, logging, tempfile, subprocess, signal, queue, re, shlex, socket, hashlib, platform as sysplat
-from urllib.parse import urlparse, urlsplit, urlunsplit, unquote
+from urllib.parse import urlparse, urlsplit, urlunsplit, unquote, quote
 from flask import Flask, request, send_file, render_template_string, jsonify, Response, stream_with_context, abort, session, redirect
 from werkzeug.utils import secure_filename
 from werkzeug.exceptions import RequestEntityTooLarge
@@ -156,7 +156,7 @@ def default_config():
                 'user': _item('admin', 'FTP 登录用户名；留空则与超级管理员同名'),
                 'pass': _item('admin123', 'FTP 登录密码；按 encryption 配置的加密方式保存'),
                 'port': _item(2121, 'FTP 端口'),
-                'passive_start': _item(60000, 'FTP 被动端口起始值（连续 50 个）'),
+                'passive_start': _item(60000, 'FTP 被动端口起始值（连续 50 个）；若端口被系统保留或安全软件拦截，会自动改用系统随机端口'),
             },
             'server': {
                 'host': _item('0.0.0.0', '网页监听地址；改成 127.0.0.1 则只允许本机访问'),
@@ -480,7 +480,57 @@ def is_admin():
     return current_user()['admin']
 
 
+def _refresh_default_auth():
+    """超级用户改用 users.json 哈希后，就不再是默认密码了。"""
+    global _IS_DEFAULT_AUTH
+    _IS_DEFAULT_AUTH = (_auth['user'] == 'admin' and _auth['pass'] == 'admin123'
+                        and _auth['user'] not in _users)
+
+
+def _admin_login_line():
+    """启动时展示超级用户凭据；密码已改成哈希时不再打印旧明文。"""
+    if _auth['user'] in _users:
+        return f'登录账号:  {_auth["user"]} / ********（密码已修改，users.json 中保存为哈希）'
+    return f'登录账号:  {_auth["user"]} / {_auth["pass"]}'
+
+
+def _set_admin_password(new):
+    """超级用户密码同步写回配置文件，避免重启后控制台仍显示旧密码。
+
+    同时清掉旧版本通过 /api/passwd 留在 users.json 里的超级用户哈希，
+    让配置文件成为超级用户密码的唯一来源。
+    """
+    global _IS_DEFAULT_AUTH
+    auth = _cfg_file.setdefault('settings', {}).setdefault('auth', {})
+    item = auth.get('admin_pass')
+    old_value = item.get('value') if isinstance(item, dict) else item
+    old_pass = _auth['pass']
+    if isinstance(item, dict):
+        item['value'] = new
+    else:
+        auth['admin_pass'] = {'value': new, 'comment': '超级管理员密码；按 encryption 配置的加密方式保存'}
+    if not save_config():
+        if isinstance(item, dict): item['value'] = old_value
+        elif item is None: auth.pop('admin_pass', None)
+        else: auth['admin_pass'] = item
+        return False
+    _auth['pass'] = new
+    old_rec = _users.pop(_auth['user'], None)
+    if old_rec is not None and not save_users():
+        _users[_auth['user']] = old_rec
+        _auth['pass'] = old_pass
+        if isinstance(item, dict): item['value'] = old_value
+        elif item is None: auth.pop('admin_pass', None)
+        else: auth['admin_pass'] = item
+        save_config()
+        _refresh_default_auth()
+        return False
+    _refresh_default_auth()
+    return True
+
+
 load_users()
+_refresh_default_auth()
 
 # ================= FTP 服务器 =================
 FTP_ENABLED = _env_flag('SD_FTP', bool(cfg('ftp', 'enabled', True)))
@@ -614,7 +664,8 @@ LOGIN_PAGE = r'''<!DOCTYPE html>
 body{font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;background:linear-gradient(135deg,#4a6cf7,#6a4af7);min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
 .card{background:#fff;border-radius:12px;padding:36px 32px;width:100%;max-width:400px;box-shadow:0 20px 60px rgba(0,0,0,.35);animation:pop .3s}
 @keyframes pop{from{transform:scale(.95);opacity:0}to{transform:scale(1);opacity:1}}
-.card h1{margin:0 0 6px;font-size:22px;color:#2c3e50;text-align:center}
+.card h1{margin:0 0 6px;font-size:22px;color:#2c3e50;text-align:center;display:flex;align-items:center;justify-content:center;gap:8px}
+.card h1 svg{width:23px;height:23px;flex-shrink:0}
 .card .sub{color:#7a8299;text-align:center;font-size:13px;margin-bottom:24px}
 .field{margin-bottom:16px}
 .field label{display:block;font-size:13px;color:#4a5568;margin-bottom:6px;font-weight:500}
@@ -626,7 +677,7 @@ body{font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;backgroun
 .error{background:#fdeceb;border:1px solid #fcc;color:#c0392b;padding:11px 14px;border-radius:6px;font-size:13px;margin-bottom:16px;text-align:center}
 </style></head><body>
 <div class="card">
-  <h1>📁 文件管理器</h1>
+  <h1><svg viewBox="0 0 24 24" fill="none" stroke="#4a6cf7" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 7.2A2.2 2.2 0 0 1 5.7 5h3.4l2 2.1h7.2a2.2 2.2 0 0 1 2.2 2.2v7.5a2.2 2.2 0 0 1-2.2 2.2H5.7a2.2 2.2 0 0 1-2.2-2.2z"/></svg><span>文件管理器</span></h1>
   <p class="sub">请输入用户名和密码登录</p>
   {% if error %}<div class="error">{{ error }}</div>{% endif %}
   <form method="post" action="/login">
@@ -652,7 +703,7 @@ def login():
         session.permanent = True
         return redirect('/')
     return render_template_string(
-        LOGIN_PAGE, error='❌ 用户名或密码错误',
+        LOGIN_PAGE, error='用户名或密码错误',
         prefill_user=u, prefill_pass='',
     )
 
@@ -713,6 +764,13 @@ def rel_to_root(p):
     if is_unrestricted():
         return p.replace(os.sep, '/')
     ap = os.path.abspath(p)
+    roots = user_roots()
+    if len(roots) == 1:
+        r = os.path.abspath(roots[0])
+        if _inside(ap, r):
+            rel = os.path.relpath(ap, r).replace(os.sep, '/')
+            return '' if rel == '.' else rel
+        return ap.replace(os.sep, '/')
     for k, r in root_aliases().items():
         if _inside(ap, r):
             rel = os.path.relpath(ap, r).replace(os.sep, '/')
@@ -725,7 +783,7 @@ def set_root(p):
         p = (p or '').strip()
         if not p:
             _cfg['root'] = ''
-            return True, '整台计算机'
+            return True, ''
         p = os.path.abspath(p)
         if not os.path.isdir(p): return False, '目录不存在'
         _cfg['root'] = p
@@ -764,6 +822,89 @@ def compress_files(paths, out):
                             zf.write(os.path.join(r, f), os.path.join(zr, f))
         return True, '压缩成功'
     except Exception as e: return False, f'压缩失败: {e}'
+
+
+def _zip_base_name(ap):
+    """目录打包后在 ZIP 里的顶层目录名；盘符根目录用盘符，Unix 根用 root。"""
+    ap = os.path.abspath(ap)
+    if os.path.dirname(ap) == ap:                 # D:\ 或 /
+        if os.name == 'nt':
+            return os.path.splitdrive(ap)[0].rstrip(':') or 'root'
+        return 'root'
+    return os.path.basename(ap.rstrip('\\/')) or 'root'
+
+
+def _attachment_header(filename):
+    """兼容中文文件名的 Content-Disposition（ASCII 回退 + RFC 5987）。"""
+    fallback = filename if filename.isascii() else 'download.zip'
+    fallback = re.sub(r'[^A-Za-z0-9._-]', '_', fallback).strip('._') or 'download.zip'
+    if not fallback.lower().endswith('.zip'):
+        fallback = 'download.zip'
+    return f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quote(filename, safe='')}"
+
+
+def zip_dir_stream(ap, norm_roots):
+    """边压缩边输出目录内容，不落临时文件、不把整个 ZIP 读进内存。
+
+    norm_roots 为 None 表示整机模式；否则是预先算好的真实路径白名单，
+    避免后台线程里访问 Flask 请求上下文。
+    """
+    q = queue.Queue(maxsize=8)
+    stop = threading.Event()
+    base = _zip_base_name(ap)
+
+    class _QueueSink:
+        def write(self, data):
+            if not data: return 0
+            while not stop.is_set():
+                try:
+                    q.put(bytes(data), timeout=0.5)
+                    return len(data)
+                except queue.Full:
+                    continue
+            raise IOError('client disconnected')
+
+        def flush(self): pass
+
+    def allowed(fp):
+        if norm_roots is None: return True
+        try: rp = os.path.normcase(os.path.realpath(fp))
+        except OSError: return False
+        return any(rp == r or rp.startswith(r.rstrip('\\/') + os.sep) for r in norm_roots)
+
+    def produce():
+        try:
+            with zipfile.ZipFile(_QueueSink(), 'w', zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
+                for r, dirs, files in os.walk(ap):
+                    dirs[:] = [d for d in dirs if allowed(os.path.join(r, d))]
+                    rel = os.path.relpath(r, ap)
+                    arc_dir = base if rel == '.' else base + '/' + rel.replace(os.sep, '/')
+                    try: zf.write(r, arc_dir)          # 保留空目录
+                    except OSError: pass
+                    for f in files:
+                        fp = os.path.join(r, f)
+                        if not allowed(fp): continue
+                        try: zf.write(fp, arc_dir + '/' + f)
+                        except OSError as e:
+                            logging.warning('打包跳过 %s: %s', fp, e)
+        except Exception:
+            if not stop.is_set(): logging.exception('流式打包失败')
+        finally:
+            while not stop.is_set():                # 队列满时也要把结束标记送到，否则消费端会一直等
+                try:
+                    q.put(None, timeout=0.5)
+                    break
+                except queue.Full:
+                    continue
+
+    threading.Thread(target=produce, daemon=True).start()
+    try:
+        while True:
+            data = q.get()
+            if data is None: break
+            yield data
+    finally:
+        stop.set()                                  # 客户端断开后让后台线程尽快退出
 
 
 def extract_zip(zp, td):
@@ -1030,6 +1171,58 @@ def start_ftp_server():
     class Handler(FTPHandler):
         filesystem = DynamicFS
 
+    # Windows 上如果配置的被动端口全部无法 bind（被系统保留、被安全软件拦截等），
+    # pyftpdlib 仍会对一个未 bind 的 socket 调 listen()，Windows 会抛 WinError 10022。
+    # 这里兜底：没有可用的固定端口时改用系统随机端口，避免 PASV 直接把当前会话打断。
+    base_passive = getattr(FTPHandler, 'passive_dtp', None)
+    if isinstance(base_passive, type):
+        class SafePassiveDTP(base_passive):
+            _fallback_warned = False
+
+            def _local_ip(self):
+                try: return self.cmd_channel.socket.getsockname()[0]
+                except OSError: return ''
+
+            def _bind_ephemeral(self):
+                if self.socket is None:
+                    self.create_socket(self.cmd_channel.socket.family, socket.SOCK_STREAM)
+                ip = self._local_ip()
+                try:
+                    self.bind((ip, 0))
+                except OSError:
+                    self.bind(('', 0))
+
+            def listen(self, num):
+                try:
+                    bound = bool(self.socket and self.socket.getsockname()[1])
+                except OSError:
+                    bound = False
+                if not bound:
+                    self._bind_ephemeral()
+                    if not type(self)._fallback_warned:
+                        self.cmd_channel.log('FTP 被动端口范围不可用，已自动改用系统随机端口')
+                        type(self)._fallback_warned = True
+                try:
+                    return super().listen(num)
+                except OSError as e:
+                    if getattr(self, '_safe_listen_retry', False):
+                        raise
+                    self._safe_listen_retry = True
+                    self.cmd_channel.log(f'FTP 被动端口监听失败（{e}），改用系统随机端口重试')
+                    try:
+                        self.del_channel()
+                    except Exception:
+                        pass
+                    finally:
+                        try:
+                            if self.socket: self.socket.close()
+                        except OSError:
+                            pass
+                    self.create_socket(self.cmd_channel.socket.family, socket.SOCK_STREAM)
+                    self._bind_ephemeral()
+                    return super().listen(num)
+        Handler.passive_dtp = SafePassiveDTP
+
     Handler.authorizer = authorizer
     Handler.banner = 'ShareDirectory FTP'
     Handler.passive_ports = FTP_PASSIVE_PORTS
@@ -1117,9 +1310,17 @@ TPL = r'''<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta na
 <style>
 *{box-sizing:border-box;margin:0;padding:0}html,body{height:100%}
 body{font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;font-size:14px;background:#f5f6fa;color:#2c3e50;overflow:hidden}
+:root{--accent:#4a6cf7;--accent2:#6a4af7;--icon:#5b6b85}
+.icon-sprite{position:absolute;width:0;height:0;overflow:hidden}
+.ico{width:18px;height:18px;display:inline-block;vertical-align:-.16em;flex-shrink:0;fill:none;stroke:currentColor;stroke-width:1.75;stroke-linecap:round;stroke-linejoin:round;pointer-events:none}
+.ico-sm{width:14px;height:14px}
+.ico-lg{width:22px;height:22px}
 .app{display:flex;flex-direction:column;height:100vh}
 .title-bar{background:linear-gradient(135deg,#4a6cf7,#6a4af7);color:#fff;padding:10px 20px;display:flex;justify-content:space-between;align-items:center;box-shadow:0 2px 8px rgba(0,0,0,.1);flex-shrink:0;gap:16px}
 .title-bar h1{font-size:16px;font-weight:600;display:flex;align-items:center;gap:8px;flex-shrink:0}
+.title-bar h1 .ico{width:20px;height:20px;stroke-width:1.9}
+.root-btn .ico{width:14px;height:14px;opacity:.85}
+.logout-btn{display:inline-flex;align-items:center;gap:5px}
 .title-actions{display:flex;gap:8px;align-items:center}
 .root-btn{display:flex;align-items:center;gap:6px;background:rgba(255,255,255,.15);border:1px solid rgba(255,255,255,.25);border-radius:6px;padding:5px 12px;color:#fff;font-size:12px;cursor:pointer;transition:.15s;max-width:60%;overflow:hidden}
 .root-btn:hover{background:rgba(255,255,255,.25)}
@@ -1132,33 +1333,46 @@ body{font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;font-size
 .toolbar .sep{width:1px;height:22px;background:#e6e8ec;margin:0 4px}
 .btn-icon{width:32px;height:32px;border:1px solid transparent;border-radius:6px;background:transparent;cursor:pointer;font-size:15px;color:#4a5568;display:flex;align-items:center;justify-content:center;transition:.15s}
 .btn-icon:hover:not(:disabled){background:#eef1f8}.btn-icon:disabled{opacity:.35;cursor:not-allowed}
-.btn{padding:6px 12px;border:1px solid #dfe3eb;border-radius:6px;background:#fff;cursor:pointer;font-size:13px;color:#2c3e50;display:inline-flex;align-items:center;gap:4px;transition:.15s;white-space:nowrap}
+.btn-icon .ico{width:17px;height:17px;color:#4a6cf7}
+.btn{padding:6px 12px;border:1px solid #dfe3eb;border-radius:6px;background:#fff;cursor:pointer;font-size:13px;color:#2c3e50;display:inline-flex;align-items:center;gap:5px;transition:.15s;white-space:nowrap}
+.btn .ico{width:15px;height:15px;color:#4a6cf7}
+.btn.primary .ico{color:#fff}
+.btn.active .ico{color:#4a6cf7}
 .btn:hover{background:#f5f7fb;border-color:#c8cede}
 .btn.primary{background:#4a6cf7;border-color:#4a6cf7;color:#fff}
 .btn.primary:hover{background:#3a5ce0}
 .btn.active{background:#e8ecfb;border-color:#4a6cf7;color:#4a6cf7}
 .breadcrumb{flex:1;min-width:200px;background:#f5f6fa;border-radius:6px;padding:6px 12px;font-size:13px;color:#4a5568;display:flex;align-items:center;gap:2px;overflow-x:auto;white-space:nowrap;border:1px solid transparent}
 .breadcrumb::-webkit-scrollbar{height:0}
-.breadcrumb .crumb{color:#4a6cf7;cursor:pointer;padding:2px 6px;border-radius:4px}
+.breadcrumb .crumb{color:#4a6cf7;cursor:pointer;padding:2px 6px;border-radius:4px;display:inline-flex;align-items:center;gap:4px}
+.breadcrumb .crumb .ico{width:14px;height:14px;color:#4a6cf7}
 .breadcrumb .crumb:hover{background:#e8ecfb}
 .breadcrumb .crumb.current{color:#2c3e50;font-weight:500;cursor:default}
 .breadcrumb .crumb.current:hover{background:transparent}
 .breadcrumb .sep{color:#a0a8b8;margin:0 2px}
 .search-box{display:flex;align-items:center;border:1px solid #dfe3eb;border-radius:6px;padding:0 8px;background:#fff;height:32px;width:200px}
 .search-box input{border:0;outline:0;flex:1;font-size:13px;padding:4px;background:transparent}
+.search-box .search-ico{color:#4a6cf7;width:15px;height:15px;margin-right:2px;opacity:.7}
 .main{flex:1;min-height:0;overflow:hidden;background:#fff;display:flex;flex-direction:row}
 .content{flex:1;min-width:0;display:flex;flex-direction:column}
 .sidebar{width:220px;flex-shrink:0;border-right:1px solid #e6e8ec;background:#fafbfc;display:flex;flex-direction:column;min-height:0}
 .side-head{display:flex;align-items:center;justify-content:space-between;padding:8px 10px;font-size:12px;color:#7a8299;border-bottom:1px solid #ebedf1;font-weight:600}
-.side-btn{border:0;background:transparent;cursor:pointer;font-size:12px;color:#7a8299}
+.side-head .side-title{display:flex;align-items:center;gap:6px}
+.side-head .side-title .ico{width:14px;height:14px;color:#4a6cf7}
+.side-btn{border:0;background:transparent;cursor:pointer;font-size:12px;color:#7a8299;display:flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:4px}
+.side-btn:hover{background:#eef1f8;color:#4a6cf7}
+.side-btn .ico{width:14px;height:14px;color:#4a6cf7}
 .tree{flex:1;overflow:auto;padding:6px 4px;font-size:13px}
 .tree-node{white-space:nowrap}
 .tree-row{display:flex;align-items:center;gap:4px;padding:3px 6px;border-radius:5px;cursor:pointer;color:#4a5568}
 .tree-row:hover{background:#eef1f8}
 .tree-row.active{background:#4a6cf7;color:#fff}
-.tree-tog{width:14px;text-align:center;color:#9aa3b5;font-size:11px;user-select:none}
+.tree-tog{width:14px;display:flex;align-items:center;justify-content:center;color:#9aa3b5;user-select:none;cursor:pointer}
+.tree-tog .ico{width:12px;height:12px}
 .tree-row.active .tree-tog{color:#fff}
-.tree-label{overflow:hidden;text-overflow:ellipsis}
+.tree-label{overflow:hidden;text-overflow:ellipsis;display:flex;align-items:center;gap:4px;min-width:0}
+.tree-label .ico{width:14px;height:14px;color:#4a6cf7;flex-shrink:0}
+.tree-row.active .tree-label .ico{color:#fff}
 .tree-kids{margin-left:12px;border-left:1px dashed #e0e4ec;padding-left:2px}
 .tree-empty{color:#b3b9c7;font-size:12px;padding:3px 8px}
 .picker-box{height:300px;overflow:auto;border:1px solid #e6e8ec;border-radius:6px;padding:6px;background:#fafbfc}
@@ -1167,7 +1381,8 @@ body{font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;font-size
 .scope-list{margin-bottom:8px}
 .scope-item{display:flex;align-items:center;gap:8px;background:#f4f6fa;border:1px solid #e6e8ec;border-radius:7px;padding:7px 10px;margin-bottom:6px}
 .scope-path{flex:1;min-width:0;font-family:Consolas,monospace;font-size:12px;color:#4a5568;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.scope-del{border:0;background:transparent;color:#b3b9c7;cursor:pointer;font-size:13px;padding:0 2px}
+.scope-del{border:0;background:transparent;color:#b3b9c7;cursor:pointer;font-size:13px;padding:0 2px;display:flex;align-items:center}
+.scope-del .ico{width:14px;height:14px}
 .scope-del:hover{color:#e74c3c}
 .scope-empty{font-size:12px;color:#b3b9c7;padding:8px 10px;border:1px dashed #e6e8ec;border-radius:7px;margin-bottom:6px}
 .user-row{display:flex;align-items:center;gap:8px;padding:6px 8px;border-bottom:1px solid #f0f2f7;font-size:13px}
@@ -1179,10 +1394,12 @@ body{font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;font-size
 .user-panel{position:fixed;inset:0;background:#f5f6fa;z-index:3500;display:none;flex-direction:column}
 .user-panel.show{display:flex}
 .user-topbar{background:linear-gradient(135deg,#4a6cf7,#6a4af7);color:#fff;padding:12px 20px;display:flex;align-items:center;gap:16px;flex-wrap:wrap;flex-shrink:0;box-shadow:0 2px 8px rgba(0,0,0,.1)}
-.user-topbar .u-title{font-size:16px;font-weight:600}
+.user-topbar .u-title{font-size:16px;font-weight:600;display:flex;align-items:center;gap:7px}
+.user-topbar .u-title .ico{width:19px;height:19px}
+.user-topbar button .ico{width:14px;height:14px}
 .user-topbar .u-stats{display:flex;gap:12px;font-size:13px;flex:1;flex-wrap:wrap}
 .user-topbar .u-stats span{background:rgba(255,255,255,.12);padding:4px 12px;border-radius:6px}
-.user-topbar button{background:rgba(255,255,255,.15);border:1px solid rgba(255,255,255,.25);color:#fff;padding:6px 12px;border-radius:6px;font-size:13px;cursor:pointer}
+.user-topbar button{background:rgba(255,255,255,.15);border:1px solid rgba(255,255,255,.25);color:#fff;padding:6px 12px;border-radius:6px;font-size:13px;cursor:pointer;display:inline-flex;align-items:center;gap:5px}
 .user-topbar button:hover{background:rgba(255,255,255,.3)}
 .user-body{flex:1;display:flex;min-height:0}
 .user-list{flex:1;overflow:auto;background:#fff}
@@ -1231,7 +1448,8 @@ table.req-table td.cmd{font-family:Consolas,monospace;max-width:420px;overflow:h
 .switch-wrap.light .switch .knob{width:14px;height:14px;top:2px;left:2px}
 .switch-wrap.light .switch.on .knob{left:16px}
 .switch-text{font-size:12px;color:#7a8299}
-.icon-btn{width:27px;height:27px;border:1px solid #dfe3eb;background:#fff;border-radius:6px;cursor:pointer;font-size:13px;line-height:1;padding:0;color:#4a5568}
+.icon-btn{width:27px;height:27px;border:1px solid #dfe3eb;background:#fff;border-radius:6px;cursor:pointer;line-height:1;padding:0;color:#4a5568;display:inline-flex;align-items:center;justify-content:center}
+.icon-btn .ico{width:14px;height:14px;color:#4a6cf7}
 .icon-btn:hover{background:#f5f7fb}
 .code-block{padding:8px 10px;font-size:11.5px;line-height:1.55}
 .side-lead{margin:-4px 0 12px}
@@ -1244,7 +1462,8 @@ table.req-table td.cmd{font-family:Consolas,monospace;max-width:420px;overflow:h
 .side-section{margin-bottom:16px}
 .input-row{display:flex;gap:8px}
 .input-row .side-input{flex:1;min-width:0}
-.btn-ghost{padding:9px 12px;border:1px solid #dfe3eb;background:#fff;border-radius:7px;cursor:pointer;font-size:13px;color:#4a5568;white-space:nowrap}
+.btn-ghost{padding:9px 12px;border:1px solid #dfe3eb;background:#fff;border-radius:7px;cursor:pointer;font-size:13px;color:#4a5568;white-space:nowrap;display:inline-flex;align-items:center;gap:5px}
+.btn-ghost .ico{width:14px;height:14px;color:#4a6cf7}
 .btn-ghost:hover{background:#f5f7fb}
 .btn-primary{padding:9px 16px;border:0;background:#4a6cf7;color:#fff;border-radius:7px;cursor:pointer;font-size:13px;font-weight:500}
 .btn-primary:hover{background:#3a5ce0}
@@ -1256,20 +1475,23 @@ table.file-table{width:100%;border-collapse:collapse}
 table.file-table thead th{position:sticky;top:0;z-index:2;background:#fafbfc;font-size:12px;font-weight:600;color:#7a8299;text-align:left;padding:10px 14px;border-bottom:1px solid #ebedf1;user-select:none;white-space:nowrap}
 table.file-table thead th.sortable{cursor:pointer}
 table.file-table thead th.sortable:hover{background:#f0f2f7;color:#4a5568}
-table.file-table thead th .sort-arrow{opacity:.5;margin-left:4px;font-size:10px}
+table.file-table thead th .sort-arrow{opacity:.62;margin-left:4px;display:inline-flex;align-items:center;vertical-align:-1px}
+table.file-table thead th .sort-arrow .ico{width:11px;height:11px;stroke-width:2;color:#4a6cf7}
 table.file-table tbody tr{cursor:default;transition:background .1s}
 table.file-table tbody tr:hover{background:#f8f9fc}
 table.file-table tbody tr.selected{background:#e8ecfb}
 table.file-table td{padding:8px 14px;font-size:13px;color:#4a5568;border-bottom:1px solid #f2f4f8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 table.file-table td.name-cell{display:flex;align-items:center;gap:8px;color:#2c3e50;user-select:none}
-table.file-table .file-icon{font-size:18px;flex-shrink:0;width:22px;text-align:center}
+table.file-table .file-icon{flex-shrink:0;width:22px;display:flex;align-items:center;justify-content:center;color:#4a6cf7}
+table.file-table .file-icon .ico{width:19px;height:19px;stroke-width:1.7}
 table.file-table .row-actions{display:flex;gap:4px;opacity:0;transition:.15s}
 table.file-table tbody tr:hover .row-actions{opacity:1}
 table.file-table .row-actions button{padding:3px 8px;font-size:12px;border:1px solid #dfe3eb;background:#fff;border-radius:4px;cursor:pointer;color:#4a5568}
 table.file-table .row-actions button:hover{background:#f5f7fb}
 table.file-table .row-actions button.danger:hover{background:#fee;color:#e74c3c;border-color:#fcc}
 .empty-state{padding:80px 20px;text-align:center;color:#a0a8b8}
-.empty-state .icon{font-size:56px;opacity:.4;margin-bottom:12px}
+.empty-state .icon{display:flex;justify-content:center;margin-bottom:12px;color:#4a6cf7;opacity:.42}
+.empty-state .icon .ico{width:52px;height:52px;stroke-width:1.15}
 .statusbar{height:28px;background:#fafbfc;border-top:1px solid #ebedf1;display:flex;align-items:center;justify-content:space-between;padding:0 16px;font-size:12px;color:#7a8299;flex-shrink:0}
 .statusbar .right{display:flex;gap:16px}
 .ctx-menu{position:fixed;background:#fff;border:1px solid #dfe3eb;border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,.12);padding:6px;min-width:180px;z-index:1000;display:none}
@@ -1278,17 +1500,24 @@ table.file-table .row-actions button.danger:hover{background:#fee;color:#e74c3c;
 .ctx-menu .item:hover{background:#f0f3fa}
 .ctx-menu .item.danger{color:#e74c3c}
 .ctx-menu .item.danger:hover{background:#fdeceb}
-.ctx-menu .item .icon{width:16px;text-align:center;font-size:14px}
+.ctx-menu .item .icon{width:17px;height:17px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.ctx-menu .item .icon .ico{width:15px;height:15px;color:#4a6cf7}
+.ctx-menu .item.danger .icon .ico{color:#e74c3c}
 .ctx-menu .divider{height:1px;background:#ebedf1;margin:4px 0}
 .modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.45);display:none;align-items:center;justify-content:center;z-index:4200;padding:20px}
 .modal-bg.show{display:flex}
 .modal{background:#fff;border-radius:10px;padding:24px;width:100%;max-width:520px;box-shadow:0 20px 60px rgba(0,0,0,.3);animation:pop .2s}
 .modal.wide{max-width:640px}
 @keyframes pop{from{transform:scale(.95);opacity:0}to{transform:scale(1);opacity:1}}
-.modal h3{font-size:16px;margin-bottom:16px}
+.modal h3{font-size:16px;margin-bottom:16px;display:flex;align-items:center;gap:6px}
+.modal h3 .ico{width:18px;height:18px;color:#4a6cf7}
 .modal .form-row{margin-bottom:14px}
 .modal label{display:block;font-size:13px;color:#4a5568;margin-bottom:6px}
 .modal input[type=text],.modal input[type=url]{width:100%;padding:9px 12px;border:1px solid #dfe3eb;border-radius:6px;font-size:14px;outline:0}
+.root-input-row{display:flex;gap:8px}
+.root-input-row input{flex:1;min-width:0}
+.root-input-row button{flex-shrink:0;padding:0 14px;border:1px solid #dfe3eb;background:#f8f9fc;border-radius:6px;cursor:pointer;font-size:13px;color:#4a5568}
+.root-input-row button:hover{background:#eef1f8}
 .modal input:focus{border-color:#4a6cf7;box-shadow:0 0 0 3px rgba(74,108,247,.1)}
 .modal .hint{font-size:12px;color:#a0a8b8;margin-top:6px}
 .modal .actions{display:flex;justify-content:flex-end;gap:8px;margin-top:20px}
@@ -1298,7 +1527,8 @@ table.file-table .row-actions button.danger:hover{background:#fee;color:#e74c3c;
 .mode-card{padding:20px 16px;border:2px solid #dfe3eb;border-radius:10px;cursor:pointer;text-align:center;transition:.15s;background:#fff}
 .mode-card:hover{border-color:#4a6cf7;background:#f5f7ff;transform:translateY(-1px)}
 .mode-card.default{border-color:#4a6cf7}
-.mode-icon{font-size:36px;margin-bottom:8px}
+.mode-icon{height:42px;display:flex;align-items:center;justify-content:center;margin-bottom:8px;color:#4a6cf7}
+.mode-icon .ico{width:38px;height:38px;stroke-width:1.45}
 .mode-title{font-weight:600;color:#2c3e50;margin-bottom:6px;font-size:14px}
 .mode-desc{font-size:12px;color:#7a8299;line-height:1.5}
 .mode-badge{display:inline-block;font-size:10px;color:#4a6cf7;background:#e8ecfb;padding:2px 8px;border-radius:8px;margin-top:6px}
@@ -1311,17 +1541,21 @@ table.file-table .row-actions button.danger:hover{background:#fee;color:#e74c3c;
 .ftp-link-box .lbl{color:#6a6a8a;font-size:11px;display:block;margin-bottom:4px;user-select:none}
 .ftp-actions{display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap}
 .ftp-actions button{flex:1;min-width:140px;padding:9px 14px;border:1px solid #dfe3eb;background:#fff;border-radius:6px;cursor:pointer;font-size:13px;color:#2c3e50;transition:.15s;display:inline-flex;align-items:center;justify-content:center;gap:6px}
+.ftp-actions button .ico{width:14px;height:14px;color:#4a6cf7}
+.ftp-actions button.primary .ico{color:#fff}
 .ftp-actions button:hover{background:#f5f7fb;border-color:#c8cede}
 .ftp-actions button.primary{background:#4a6cf7;border-color:#4a6cf7;color:#fff}
 .ftp-actions button.primary:hover{background:#3a5ce0}
 .ftp-tip{background:#fff9e6;border:1px solid #ffe08a;padding:12px 16px;border-radius:6px;font-size:12.5px;color:#8a6d00;line-height:1.8}
 .ftp-tip b{color:#664e00}
+.ftp-tip .ico{width:13px;height:13px;vertical-align:-2px;margin-right:3px}
 .preview-bg{position:fixed;inset:0;background:rgba(0,0,0,.85);display:none;flex-direction:column;z-index:4000}
 .preview-bg.show{display:flex}
 .preview-header{height:48px;display:flex;align-items:center;justify-content:space-between;padding:0 20px;background:rgba(0,0,0,.4);color:#fff;flex-shrink:0;backdrop-filter:blur(8px)}
 .preview-title{font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
 .preview-actions{display:flex;gap:8px;flex-shrink:0}
-.preview-actions button{padding:6px 14px;background:rgba(255,255,255,.15);border:1px solid rgba(255,255,255,.2);color:#fff;border-radius:6px;cursor:pointer;font-size:13px}
+.preview-actions button{padding:6px 14px;background:rgba(255,255,255,.15);border:1px solid rgba(255,255,255,.2);color:#fff;border-radius:6px;cursor:pointer;font-size:13px;display:inline-flex;align-items:center;gap:5px}
+.preview-actions button .ico{width:14px;height:14px}
 .preview-actions button:hover{background:rgba(255,255,255,.3)}
 .preview-body{flex:1;display:flex;align-items:center;justify-content:center;overflow:auto;padding:20px}
 .preview-body img,.preview-body video{max-width:100%;max-height:100%;border-radius:6px;box-shadow:0 10px 40px rgba(0,0,0,.5)}
@@ -1334,7 +1568,10 @@ table.file-table .row-actions button.danger:hover{background:#fee;color:#e74c3c;
 .upload-header{padding:12px 16px;background:linear-gradient(135deg,#4a6cf7,#6a4af7);color:#fff;display:flex;align-items:center;justify-content:space-between;cursor:pointer;user-select:none;gap:8px}
 .upload-header .title{font-size:13px;font-weight:600;display:flex;align-items:center;gap:8px;overflow:hidden;flex:1;min-width:0}
 .upload-header .file-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:400;opacity:.9}
-.upload-header .toggle{flex-shrink:0;font-size:12px;transition:transform .2s;width:16px;text-align:center}
+.upload-header .toggle{flex-shrink:0;transition:transform .2s;width:16px;display:flex;align-items:center;justify-content:center}
+.upload-header .toggle .ico{width:14px;height:14px}
+.upload-header .title .ico{width:15px;height:15px}
+.upload-header .close-btn .ico{width:12px;height:12px}
 .upload-panel.collapsed .upload-header .toggle{transform:rotate(-180deg)}
 .upload-header .close-btn{flex-shrink:0;width:20px;height:20px;border-radius:4px;background:rgba(255,255,255,.15);border:0;color:#fff;cursor:pointer;display:none;align-items:center;justify-content:center;font-size:12px}
 .upload-panel.done .upload-header .close-btn{display:flex}
@@ -1345,7 +1582,11 @@ table.file-table .row-actions button.danger:hover{background:#fee;color:#e74c3c;
 .upload-stats{display:grid;grid-template-columns:1fr 1fr;gap:6px 14px;font-size:12px;color:#7a8299}
 .upload-stats b{color:#4a6cf7;font-weight:600}
 .upload-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:12px}
-.upload-actions button{padding:6px 14px;border-radius:6px;border:1px solid #dfe3eb;background:#fff;cursor:pointer;font-size:12px}
+.upload-actions button{padding:6px 14px;border-radius:6px;border:1px solid #dfe3eb;background:#fff;cursor:pointer;font-size:12px;display:inline-flex;align-items:center;gap:5px}
+.upload-actions button .ico{width:13px;height:13px;color:#4a6cf7}
+.upload-actions button.retry{background:#4a6cf7;border-color:#4a6cf7;color:#fff}
+.upload-actions button.retry:hover{background:#3a5ce0}
+.upload-actions button.retry .ico{color:#fff}
 
 /* ====== 终端面板（现在是 .app 的 flex 子元素，展开时挤压文件列表） ====== */
 .terminal-panel{flex-shrink:0;height:380px;background:#1e1e2e;color:#e6e6e6;display:flex;flex-direction:column;border-top:1px solid #dfe3eb;transition:height .25s;font-family:Consolas,Monaco,monospace}
@@ -1354,12 +1595,15 @@ table.file-table .row-actions button.danger:hover{background:#fee;color:#e74c3c;
 .terminal-panel.collapsed .toggle-icon{transform:rotate(180deg)}
 .terminal-header{height:34px;display:flex;align-items:center;justify-content:space-between;padding:0 14px;background:#252536;cursor:pointer;user-select:none;flex-shrink:0;border-bottom:1px solid #333}
 .terminal-title{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;color:#b8b8d0;overflow:hidden}
+.terminal-title .ico{width:15px;height:15px}
 .terminal-platform{font-size:11px;color:#4af7a0;font-weight:500;padding:2px 8px;background:rgba(74,247,160,.1);border-radius:4px;flex-shrink:0}
 .terminal-cwd{font-size:11px;color:#6a6a8a;font-family:Consolas,monospace;max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .terminal-header-actions{display:flex;align-items:center;gap:4px}
-.term-btn{width:24px;height:24px;border:0;background:transparent;color:#888;cursor:pointer;border-radius:4px;font-size:13px;display:flex;align-items:center;justify-content:center}
+.term-btn{width:24px;height:24px;border:0;background:transparent;color:#aeb9d6;cursor:pointer;border-radius:4px;display:flex;align-items:center;justify-content:center}
+.term-btn .ico{width:14px;height:14px}
 .term-btn:hover{background:#3a3a4e;color:#ccc}
-.toggle-icon{color:#888;font-size:11px;transition:transform .2s;margin-left:4px}
+.toggle-icon{color:#aeb9d6;transition:transform .2s;margin-left:4px;display:flex;align-items:center}
+.toggle-icon .ico{width:14px;height:14px}
 .terminal-body{flex:1;min-height:0;display:flex;overflow:hidden}
 .terminal-history{width:200px;background:#222232;border-right:1px solid #333;display:flex;flex-direction:column;flex-shrink:0}
 .history-header{padding:8px 12px;font-size:11px;color:#6a6a8a;text-transform:uppercase;letter-spacing:.5px;border-bottom:1px solid #2a2a3a;display:flex;justify-content:space-between;align-items:center}
@@ -1375,6 +1619,7 @@ table.file-table .row-actions button.danger:hover{background:#fee;color:#e74c3c;
 .terminal-output .exit-line{color:#6a6a8a;font-style:italic}
 .terminal-output .info-line{color:#4af7a0}
 .terminal-output .hint-line{color:#7a8299;padding-left:14px;margin:2px 0}
+.terminal-output .ico{width:15px;height:15px;vertical-align:-2px}
 .terminal-output .hint-cmd{color:#4af7a0;background:rgba(74,247,160,.08);padding:1px 6px;border-radius:3px;font-family:Consolas,monospace;cursor:pointer}
 .terminal-output .hint-cmd:hover{background:rgba(74,247,160,.2)}
 .terminal-input-row{display:flex;align-items:center;padding:8px 14px;background:#252536;border-top:1px solid #333;gap:8px;flex-shrink:0}
@@ -1388,11 +1633,15 @@ table.file-table .row-actions button.danger:hover{background:#fee;color:#e74c3c;
 .completion-list{padding:4px}
 .completion-item{padding:6px 12px;font-size:12.5px;color:#ccc;cursor:pointer;border-radius:4px;display:flex;align-items:center;gap:8px}
 .completion-item:hover,.completion-item.active{background:#3a3a5e;color:#fff}
-.completion-item .cmd-icon{color:#4af7a0;font-size:11px}
+.completion-item .cmd-icon{color:#4af7a0;display:flex;align-items:center}
+.completion-item .cmd-icon .ico{width:14px;height:14px}
 
 .process-panel{position:fixed;inset:0;background:#f5f6fa;z-index:3500;display:none;flex-direction:column}
 .process-panel.show{display:flex}
 .process-topbar{background:linear-gradient(135deg,#4a6cf7,#6a4af7);color:#fff;padding:12px 20px;display:flex;align-items:center;gap:16px;flex-wrap:wrap;flex-shrink:0;box-shadow:0 2px 8px rgba(0,0,0,.1)}
+.process-topbar .process-title{display:flex;align-items:center;gap:7px;font-size:16px;font-weight:600}
+.process-topbar .process-title .ico{width:20px;height:20px}
+.process-topbar .btn .ico{width:14px;height:14px}
 .process-title{font-size:16px;font-weight:600;display:flex;align-items:center;gap:8px}
 .process-stats{display:flex;gap:16px;font-size:13px;flex:1;flex-wrap:wrap}
 .process-stats .stat{display:flex;align-items:center;gap:6px;background:rgba(255,255,255,.12);padding:4px 12px;border-radius:6px}
@@ -1403,11 +1652,13 @@ table.file-table .row-actions button.danger:hover{background:#fee;color:#e74c3c;
 .process-refresh-toggle{display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;user-select:none;padding:4px 10px;border-radius:6px;background:rgba(255,255,255,.12)}
 .process-panel .btn{background:rgba(255,255,255,.15);border-color:rgba(255,255,255,.25);color:#fff}
 .process-panel .btn:hover{background:rgba(255,255,255,.3)}
+.process-panel .btn .ico{color:#fff}
 .process-body{flex:1;overflow:auto;background:#fff}
 table.process-table{width:100%;border-collapse:collapse;font-size:13px}
 table.process-table thead th{position:sticky;top:0;z-index:2;background:#fafbfc;color:#7a8299;font-size:12px;font-weight:600;text-align:left;padding:10px 14px;border-bottom:1px solid #ebedf1;cursor:pointer;user-select:none;white-space:nowrap}
 table.process-table thead th:hover{background:#f0f2f7;color:#4a5568}
-table.process-table thead th .sort-arrow{opacity:.5;margin-left:4px;font-size:10px}
+table.process-table thead th .sort-arrow{opacity:.62;margin-left:4px;display:inline-flex;align-items:center;vertical-align:-1px}
+table.process-table thead th .sort-arrow .ico{width:11px;height:11px;stroke-width:2;color:#4a6cf7}
 table.process-table tbody tr:hover{background:#f8f9fc}
 table.process-table td{padding:6px 14px;border-bottom:1px solid #f2f4f8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#4a5568}
 table.process-table td.pid-cell{font-family:Consolas,monospace;color:#7a8299;width:80px}
@@ -1431,32 +1682,86 @@ table.process-table tbody tr:hover .process-actions{opacity:1}
 .toast.success{background:#27ae60}.toast.error{background:#e74c3c}
 @keyframes slideIn{from{transform:translateX(20px);opacity:0}to{transform:translateX(0);opacity:1}}
 </style></head><body>
+<!-- 统一线性图标：24×24 网格，颜色跟随 currentColor，强调色由 CSS 控制 -->
+<svg class="icon-sprite" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
+<symbol id="i-folder" viewBox="0 0 24 24"><path d="M3.5 7.2A2.2 2.2 0 0 1 5.7 5h3.4l2 2.1h7.2a2.2 2.2 0 0 1 2.2 2.2v7.5a2.2 2.2 0 0 1-2.2 2.2H5.7a2.2 2.2 0 0 1-2.2-2.2z"/></symbol>
+<symbol id="i-folder-open" viewBox="0 0 24 24"><path d="M3.5 8.5V7A2 2 0 0 1 5.5 5h3.2l2 2H18a2 2 0 0 1 2 2v1"/><path d="M3.8 9.5h16.4a1.5 1.5 0 0 1 1.45 1.88l-1.35 5.4A2.5 2.5 0 0 1 17.9 19H6.1a2.5 2.5 0 0 1-2.42-1.96L2.35 11.4A1.5 1.5 0 0 1 3.8 9.5Z"/></symbol>
+<symbol id="i-folder-plus" viewBox="0 0 24 24"><path d="M3.5 7.2A2.2 2.2 0 0 1 5.7 5h3.4l2 2.1h7.2a2.2 2.2 0 0 1 2.2 2.2v7.5a2.2 2.2 0 0 1-2.2 2.2H5.7a2.2 2.2 0 0 1-2.2-2.2z"/><path d="M12 11v5M9.5 13.5h5"/></symbol>
+<symbol id="i-file" viewBox="0 0 24 24"><path d="M6 3.5h7l5 5v12H6z"/><path d="M13 3.5v5h5"/></symbol>
+<symbol id="i-file-text" viewBox="0 0 24 24"><path d="M6 3.5h7l5 5v12H6z"/><path d="M13 3.5v5h5M9 13h6M9 16.5h4"/></symbol>
+<symbol id="i-image" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="2"/><circle cx="8.5" cy="9.5" r="1.5"/><path d="m4.5 17 4.5-4 3 2.5 3-3 4.5 4.5"/></symbol>
+<symbol id="i-video" viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="14" rx="2"/><path d="m10 9 5 3-5 3z"/></symbol>
+<symbol id="i-music" viewBox="0 0 24 24"><path d="M9 17V6l8-2v11"/><circle cx="6.5" cy="17.5" r="2.5"/><circle cx="14.5" cy="15.5" r="2.5"/></symbol>
+<symbol id="i-archive" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="4" rx="1"/><path d="M5 8.5v9A2.5 2.5 0 0 0 7.5 20h9a2.5 2.5 0 0 0 2.5-2.5v-9M10 12h4"/></symbol>
+<symbol id="i-book" viewBox="0 0 24 24"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v16H6.5A2.5 2.5 0 0 0 4 21.5z"/><path d="M4 18.5A2.5 2.5 0 0 1 6.5 16H20"/></symbol>
+<symbol id="i-grid" viewBox="0 0 24 24"><rect x="3.5" y="4" width="17" height="16" rx="2"/><path d="M3.5 9.5h17M9.5 4v16M15 4v16"/></symbol>
+<symbol id="i-monitor" viewBox="0 0 24 24"><rect x="3" y="4.5" width="18" height="12" rx="2"/><path d="M8 20h8M12 16.5V20"/></symbol>
+<symbol id="i-code" viewBox="0 0 24 24"><path d="m8 8-4 4 4 4M16 8l4 4-4 4M13.5 5l-3 14"/></symbol>
+<symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c2.2 2.3 3.3 5.2 3.3 8.5S14.2 18.2 12 20.5C9.8 18.2 8.7 15.3 8.7 12S9.8 5.8 12 3.5Z"/></symbol>
+<symbol id="i-cpu" viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="2"/><path d="M9.5 3.5v3M14.5 3.5v3M9.5 17.5v3M14.5 17.5v3M3.5 9.5h3M3.5 14.5h3M17.5 9.5h3M17.5 14.5h3"/></symbol>
+<symbol id="i-users" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><path d="M3.5 19a5.5 5.5 0 0 1 11 0M16 5.5a3 3 0 0 1 0 5.8M17.5 14a5 5 0 0 1 3 4.5"/></symbol>
+<symbol id="i-layers" viewBox="0 0 24 24"><path d="m12 3 8.5 4.5L12 12 3.5 7.5z"/><path d="m3.5 12 8.5 4.5 8.5-4.5M3.5 16.5 12 21l8.5-4.5"/></symbol>
+<symbol id="i-inbox" viewBox="0 0 24 24"><path d="M4 5.5h16v6l-2.5 7h-11L4 11.5z"/><path d="M4 11.5h4l1.5 2h5l1.5-2h4"/></symbol>
+<symbol id="i-edit" viewBox="0 0 24 24"><path d="M4 20h4l10.5-10.5a2.1 2.1 0 0 0-3-3L5 17z"/><path d="m13.5 6.5 3 3"/></symbol>
+<symbol id="i-logout" viewBox="0 0 24 24"><path d="M14 4H6.5A1.5 1.5 0 0 0 5 5.5v13A1.5 1.5 0 0 0 6.5 20H14"/><path d="m17 8 4 4-4 4M9 12h12"/></symbol>
+<symbol id="i-key" viewBox="0 0 24 24"><circle cx="8" cy="12" r="3.5"/><path d="M11.5 12H21M17 12v3M20 12v2.5"/></symbol>
+<symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M9 3.5h6M7 7l1 13h8l1-13M10 11v5M14 11v5"/></symbol>
+<symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1.5"/></symbol>
+<symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+<symbol id="i-check" viewBox="0 0 24 24"><path d="m4 12 5 5L20 6"/></symbol>
+<symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></symbol>
+<symbol id="i-cut" viewBox="0 0 24 24"><circle cx="6" cy="7" r="3"/><circle cx="6" cy="17" r="3"/><path d="M8.5 8.5 20 20M8.5 15.5 20 4"/></symbol>
+<symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6S2.5 12 2.5 12Z"/><circle cx="12" cy="12" r="2.5"/></symbol>
+<symbol id="i-eye-off" viewBox="0 0 24 24"><path d="M3 3l18 18M10.6 6.2A10.4 10.4 0 0 1 12 6c6 0 9.5 6 9.5 6a16 16 0 0 1-3 3.4M6.4 6.5C4 8.2 2.5 12 2.5 12s3.5 6 9.5 6a9.8 9.8 0 0 0 4.2-.9"/></symbol>
+<symbol id="i-pin" viewBox="0 0 24 24"><path d="M9 4h6l-1.5 5 3.5 3.5H7L10.5 9z"/><path d="M12 12.5V21"/></symbol>
+<symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 3.5 21 20H3z"/><path d="M12 9v5M12 17h.01"/></symbol>
+<symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6"/><path d="m15 15 5 5"/></symbol>
+<symbol id="i-package" viewBox="0 0 24 24"><path d="m12 3 8 4.5v9L12 21l-8-4.5v-9z"/><path d="M4 7.5 12 12l8-4.5M12 12v9"/></symbol>
+<symbol id="i-bulb" viewBox="0 0 24 24"><path d="M9 18h6M10 21h4M8.5 14.5a5.5 5.5 0 1 1 7 0c-1 .8-1.5 1.5-1.5 2.5h-4c0-1-.5-1.7-1.5-2.5Z"/></symbol>
+<symbol id="i-home" viewBox="0 0 24 24"><path d="m3.5 11 8.5-7 8.5 7"/><path d="M5.5 9.5V20h13V9.5M9.5 20v-6h5v6"/></symbol>
+<symbol id="i-arrow-left" viewBox="0 0 24 24"><path d="M20 12H4M10 6l-6 6 6 6"/></symbol>
+<symbol id="i-arrow-right" viewBox="0 0 24 24"><path d="M4 12h16M14 6l6 6-6 6"/></symbol>
+<symbol id="i-arrow-up" viewBox="0 0 24 24"><path d="M12 20V4M6 10l6-6 6 6"/></symbol>
+<symbol id="i-arrow-down" viewBox="0 0 24 24"><path d="M12 4v16M6 14l6 6 6-6"/></symbol>
+<symbol id="i-chevron-up" viewBox="0 0 24 24"><path d="m6 15 6-6 6 6"/></symbol>
+<symbol id="i-chevron-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+<symbol id="i-chevron-right" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></symbol>
+<symbol id="i-cloud-download" viewBox="0 0 24 24"><path d="M7 18a4.5 4.5 0 0 1-.6-8.96A6 6 0 0 1 18 10.5a3.75 3.75 0 0 1 1 7.5"/><path d="M12 12v7M9 16l3 3 3-3"/></symbol>
+<symbol id="i-terminal" viewBox="0 0 24 24"><rect x="3" y="4.5" width="18" height="15" rx="2"/><path d="m7 9 3 3-3 3M12.5 15H17"/></symbol>
+<symbol id="i-server" viewBox="0 0 24 24"><rect x="3.5" y="4" width="17" height="6" rx="1.5"/><rect x="3.5" y="14" width="17" height="6" rx="1.5"/><path d="M7 7h.01M7 17h.01M11 7h6M11 17h6"/></symbol>
+<symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+<symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 11a8 8 0 0 0-13.7-5.3L4 8"/><path d="M4 4v4h4"/><path d="M4 13a8 8 0 0 0 13.7 5.3L20 16"/><path d="M20 20v-4h-4"/></symbol>
+<symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 16V4M7 9l5-5 5 5"/><path d="M4 16v2.5A2.5 2.5 0 0 0 6.5 21h11a2.5 2.5 0 0 0 2.5-2.5V16"/></symbol>
+<symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v12M7 11l5 5 5-5"/><path d="M4 16v2.5A2.5 2.5 0 0 0 6.5 21h11a2.5 2.5 0 0 0 2.5-2.5V16"/></symbol>
+<symbol id="i-link" viewBox="0 0 24 24"><path d="M10 13a4 4 0 0 0 5.7 0l2.8-2.8a4 4 0 0 0-5.7-5.7L11.5 5.8"/><path d="M14 11a4 4 0 0 0-5.7 0l-2.8 2.8a4 4 0 0 0 5.7 5.7l1.3-1.3"/></symbol>
+<symbol id="i-move" viewBox="0 0 24 24"><path d="M4 12h16M14 6l6 6-6 6"/><path d="M4 7v10"/></symbol>
+</svg>
 <div class="app">
-<div class="title-bar"><h1>📁 文件管理器</h1>
+<div class="title-bar"><h1><svg class="ico" aria-hidden="true"><use href="#i-folder"></use></svg><span>文件管理器</span></h1>
 <div class="title-actions">
-<button class="root-btn" onclick="showRootModal()" title="点击更改根目录"><span class="label">根目录</span><span class="path" id="rootPathDisplay">{{ROOT_DIR}}</span><span>✎</span></button>
-<a class="logout-btn" href="/logout" title="退出登录">🚪 退出</a>
+<button class="root-btn" onclick="showRootModal()" title="点击更改根目录"><span class="label">根目录</span><span class="path" id="rootPathDisplay">{{ROOT_DIR or '整台计算机'}}</span><svg class="ico" aria-hidden="true"><use href="#i-edit"></use></svg></button>
+<a class="logout-btn" href="/logout" title="退出登录"><svg class="ico" aria-hidden="true"><use href="#i-logout"></use></svg><span>退出</span></a>
 </div>
 </div>
 <div class="toolbar">
 <div class="group">
-<button class="btn-icon" id="btnBack" onclick="goBack()">←</button>
-<button class="btn-icon" id="btnForward" onclick="goForward()">→</button>
-<button class="btn-icon" id="btnUp" onclick="goUp()">↑</button>
-<button class="btn-icon" onclick="refresh()">🔄</button>
+<button class="btn-icon" id="btnBack" onclick="goBack()" title="后退"><svg class="ico" aria-hidden="true"><use href="#i-arrow-left"></use></svg></button>
+<button class="btn-icon" id="btnForward" onclick="goForward()" title="前进"><svg class="ico" aria-hidden="true"><use href="#i-arrow-right"></use></svg></button>
+<button class="btn-icon" id="btnUp" onclick="goUp()" title="上一级"><svg class="ico" aria-hidden="true"><use href="#i-arrow-up"></use></svg></button>
+<button class="btn-icon" onclick="refresh()" title="刷新"><svg class="ico" aria-hidden="true"><use href="#i-refresh"></use></svg></button>
 </div><div class="sep"></div>
 <div class="breadcrumb" id="breadcrumb"></div><div class="sep"></div>
-<div class="search-box"><input id="searchInput" placeholder="搜索文件…" onkeydown="if(event.key==='Enter')doSearch()"></div>
-<button class="btn primary" onclick="onUploadClick()">⬆ 上传</button>
-<button class="btn" onclick="showMkdir()">＋ 新建文件夹</button>
-<button class="btn" onclick="showRemoteDownload()">🌐 远程下载</button>
-<button class="btn" id="btnTerminal" onclick="toggleTerminal()">💻 终端</button>
-<button class="btn" id="btnProcess" onclick="openProcessPanel()">⚙️ 进程</button>
-<button class="btn" id="btnUsers" onclick="openUserPanel()">👤 <span id="userName">用户</span></button>
+<div class="search-box"><svg class="ico search-ico" aria-hidden="true"><use href="#i-search"></use></svg><input id="searchInput" placeholder="搜索文件…" onkeydown="if(event.key==='Enter')doSearch()"></div>
+<button class="btn primary" onclick="onUploadClick()"><svg class="ico" aria-hidden="true"><use href="#i-upload"></use></svg>上传</button>
+<button class="btn" onclick="showMkdir()"><svg class="ico" aria-hidden="true"><use href="#i-folder-plus"></use></svg>新建文件夹</button>
+<button class="btn" onclick="showRemoteDownload()"><svg class="ico" aria-hidden="true"><use href="#i-cloud-download"></use></svg>远程下载</button>
+<button class="btn" id="btnTerminal" onclick="toggleTerminal()"><svg class="ico" aria-hidden="true"><use href="#i-terminal"></use></svg>终端</button>
+<button class="btn" id="btnProcess" onclick="openProcessPanel()"><svg class="ico" aria-hidden="true"><use href="#i-cpu"></use></svg>进程</button>
+<button class="btn" id="btnUsers" onclick="openUserPanel()"><svg class="ico" aria-hidden="true"><use href="#i-users"></use></svg><span id="userName">用户</span></button>
 </div>
 <div class="main">
 <div class="sidebar" id="sidebar">
-<div class="side-head"><span>📚 资源目录</span><button class="side-btn" onclick="treeInit()" title="刷新目录树">🔄</button></div>
+<div class="side-head"><span class="side-title"><svg class="ico" aria-hidden="true"><use href="#i-layers"></use></svg><span>资源目录</span></span><button class="side-btn" onclick="treeInit()" title="刷新目录树"><svg class="ico" aria-hidden="true"><use href="#i-refresh"></use></svg></button></div>
 <div class="tree" id="treeRoot"></div>
 </div>
 <div class="content"><div class="file-area" id="fileArea">
@@ -1466,7 +1771,7 @@ table.process-table tbody tr:hover .process-actions{opacity:1}
 <th class="sortable" style="width:100px">大小 <span class="sort-arrow" id="sortSize"></span></th>
 <th style="width:200px">操作</th>
 </tr></thead><tbody id="fileList"></tbody></table>
-<div class="empty-state" id="emptyState" style="display:none"><div class="icon">📭</div><div class="text">此文件夹为空</div></div>
+<div class="empty-state" id="emptyState" style="display:none"><div class="icon"><svg class="ico" aria-hidden="true"><use href="#i-inbox"></use></svg></div><div class="text">此文件夹为空</div></div>
 </div>
 <div class="statusbar"><span id="statusText">准备就绪</span><div class="right"><span id="selectionText"></span></div></div>
 </div><!-- /.content -->
@@ -1474,8 +1779,8 @@ table.process-table tbody tr:hover .process-actions{opacity:1}
 
 <!-- 终端面板：现在位于 .app 内部，是 flex 布局的一部分 -->
 <div class="terminal-panel collapsed" id="terminalPanel">
-<div class="terminal-header" onclick="toggleTerminal(event)"><span class="terminal-title"><span>💻</span><span>远程命令</span><span class="terminal-platform" id="terminalPlatform">—</span><span class="terminal-cwd" id="terminalCwdDisplay">—</span></span>
-<div class="terminal-header-actions" onclick="event.stopPropagation()"><button class="term-btn" onclick="openTokenPanel()" title="远程命令接口（Token）">🔑</button><button class="term-btn" onclick="clearTerminal()">🗑️</button><button class="term-btn" onclick="killTerminalProcess()" id="btnKillProc" style="display:none">⏹</button><span class="toggle-icon">▲</span></div></div>
+<div class="terminal-header" onclick="toggleTerminal(event)"><span class="terminal-title"><svg class="ico" aria-hidden="true"><use href="#i-terminal"></use></svg><span>远程命令</span><span class="terminal-platform" id="terminalPlatform">—</span><span class="terminal-cwd" id="terminalCwdDisplay">—</span></span>
+<div class="terminal-header-actions" onclick="event.stopPropagation()"><button class="term-btn" onclick="openTokenPanel()" title="远程命令接口（Token）"><svg class="ico" aria-hidden="true"><use href="#i-key"></use></svg></button><button class="term-btn" onclick="clearTerminal()" title="清空终端"><svg class="ico" aria-hidden="true"><use href="#i-trash"></use></svg></button><button class="term-btn" onclick="killTerminalProcess()" id="btnKillProc" style="display:none" title="终止当前命令"><svg class="ico" aria-hidden="true"><use href="#i-stop"></use></svg></button><span class="toggle-icon"><svg class="ico" aria-hidden="true"><use href="#i-chevron-up"></use></svg></span></div></div>
 <div class="terminal-body">
 <div class="terminal-history"><div class="history-header"><span>历史记录</span><span class="history-clear" onclick="clearHistory()">清空</span></div><div class="history-list" id="historyList"></div></div>
 <div class="terminal-main"><div class="terminal-output" id="terminalOutput"></div>
@@ -1486,10 +1791,10 @@ table.process-table tbody tr:hover .process-actions{opacity:1}
 </div><!-- /.app -->
 
 <div class="ctx-menu" id="ctxMenu"></div>
-<div class="preview-bg" id="previewModal"><div class="preview-header"><span class="preview-title" id="previewTitle"></span><div class="preview-actions"><button onclick="downloadFromPreview()">⬇ 下载</button><button class="close" onclick="closePreview()">✕ 关闭 (Esc)</button></div></div><div class="preview-body" id="previewBody"></div></div>
-<div class="upload-panel" id="uploadPanel"><div class="upload-header" onclick="toggleUploadPanel(event)"><span class="title"><span id="uploadTitleIcon">⬆</span><span id="uploadTitleText">上传进度</span><span class="file-name" id="uploadFileName"></span></span><button class="close-btn" onclick="closeUploadPanel(event)">✕</button><span class="toggle">▲</span></div><div class="upload-body"><div class="progress-wrap" id="uploadProgressWrap"><div class="fill" id="uploadProgressFill"></div></div><div class="upload-stats"><div>已上传：<b id="uploadedSize">0B</b> / <b id="totalSize">0B</b></div><div>速度：<b id="uploadSpeed">0 KB/s</b></div><div>剩余时间：<b id="remainingTime">--</b></div><div>分片：<b id="currentChunk">0</b> / <b id="totalChunks">0</b></div></div><div class="upload-actions"><button id="btnCancelUpload" onclick="cancelUpload()">取消上传</button></div></div></div>
+<div class="preview-bg" id="previewModal"><div class="preview-header"><span class="preview-title" id="previewTitle"></span><div class="preview-actions"><button onclick="downloadFromPreview()"><svg class="ico" aria-hidden="true"><use href="#i-download"></use></svg>下载</button><button class="close" onclick="closePreview()"><svg class="ico" aria-hidden="true"><use href="#i-close"></use></svg>关闭 (Esc)</button></div></div><div class="preview-body" id="previewBody"></div></div>
+<div class="upload-panel" id="uploadPanel"><div class="upload-header" onclick="toggleUploadPanel(event)"><span class="title"><span id="uploadTitleIcon"><svg class="ico" aria-hidden="true"><use href="#i-upload"></use></svg></span><span id="uploadTitleText">上传进度</span><span class="file-name" id="uploadFileName"></span></span><button class="close-btn" onclick="closeUploadPanel(event)" title="关闭"><svg class="ico" aria-hidden="true"><use href="#i-close"></use></svg></button><span class="toggle"><svg class="ico" aria-hidden="true"><use href="#i-chevron-up"></use></svg></span></div><div class="upload-body"><div class="progress-wrap" id="uploadProgressWrap"><div class="fill" id="uploadProgressFill"></div></div><div class="upload-stats"><div>已上传：<b id="uploadedSize">0B</b> / <b id="totalSize">0B</b></div><div>速度：<b id="uploadSpeed">0 KB/s</b></div><div>剩余时间：<b id="remainingTime">--</b></div><div>分片：<b id="currentChunk">0</b> / <b id="totalChunks">0</b></div></div><div class="upload-actions"><button id="btnRetryUpload" class="retry" onclick="retryUpload()" title="从已上传的分片继续" style="display:none"><svg class="ico" aria-hidden="true"><use href="#i-refresh"></use></svg>重试续传</button><button id="btnCancelUpload" onclick="cancelUpload()">取消上传</button></div></div></div>
 <div class="process-panel" id="processPanel">
-<div class="process-topbar"><div class="process-title">⚙️ 进程管理</div>
+<div class="process-topbar"><div class="process-title"><svg class="ico" aria-hidden="true"><use href="#i-cpu"></use></svg>进程管理</div>
 <div class="process-stats" id="processStats">
 <div class="stat">进程数 <b id="statProcCount">-</b></div>
 <div class="stat">CPU <b id="statCpu">-</b></div>
@@ -1498,8 +1803,8 @@ table.process-table tbody tr:hover .process-actions{opacity:1}
 </div>
 <div class="process-search"><input id="processSearch" placeholder="搜索进程名 / PID / 命令行…" oninput="renderProcesses()"></div>
 <label class="process-refresh-toggle"><input type="checkbox" id="processAutoRefresh" checked> 自动刷新</label>
-<button class="btn" onclick="refreshProcesses(true)">🔄 刷新</button>
-<button class="btn" onclick="closeProcessPanel()">✕ 关闭</button>
+<button class="btn" onclick="refreshProcesses(true)"><svg class="ico" aria-hidden="true"><use href="#i-refresh"></use></svg>刷新</button>
+<button class="btn" onclick="closeProcessPanel()"><svg class="ico" aria-hidden="true"><use href="#i-close"></use></svg>关闭</button>
 </div>
 <div class="process-body"><table class="process-table"><thead><tr>
 <th class="sortable" data-key="pid">PID <span class="sort-arrow" data-key="pid"></span></th>
@@ -1510,7 +1815,11 @@ table.process-table tbody tr:hover .process-actions{opacity:1}
 </tr></thead><tbody id="processList"></tbody></table></div>
 <div class="process-footer"><span id="processFooterLeft">—</span><span id="processFooterRight"></span></div>
 </div>
-<div class="modal-bg" id="rootModal"><div class="modal"><h3>更改根目录</h3><div class="form-row"><label>目录绝对路径（留空 = 整台计算机）</label><input type="text" id="rootInput" placeholder="留空即列出所有盘符；例如 D:/" onkeydown="if(event.key==='Enter')doSetRoot()"><div class="hint">留空：可访问整台计算机（显示所有盘符）；填写目录：所有操作限制在该目录内</div></div><div class="actions"><button onclick="closeModal('rootModal')">取消</button><button class="primary" onclick="doSetRoot()">确定切换</button></div></div></div>
+<div class="modal-bg" id="rootModal"><div class="modal">
+<h3>更改根目录</h3>
+<div class="form-row"><label>目录绝对路径（留空 = 整台计算机）</label><div class="root-input-row"><input type="text" id="rootInput" placeholder="留空即列出所有盘符；例如 D:/" onkeydown="if(event.key==='Enter')doSetRoot()"><button type="button" onclick="pickRootDir()">浏览…</button></div><div class="hint">直接输入任意绝对路径，或点“浏览…”选择目录；切换后所有操作限制在该目录内</div></div>
+<div class="actions"><button onclick="closeModal('rootModal')">取消</button><button class="primary" onclick="doSetRoot()">确定切换</button></div>
+</div></div>
 <div class="modal-bg" id="mkdirModal"><div class="modal"><h3>新建文件夹</h3><div class="form-row"><label>文件夹名称</label><input type="text" id="mkdirName" onkeydown="if(event.key==='Enter')doMkdir()"></div><div class="actions"><button onclick="closeModal('mkdirModal')">取消</button><button class="primary" onclick="doMkdir()">创建</button></div></div></div>
 <div class="modal-bg" id="compressModal"><div class="modal"><h3>压缩为 ZIP</h3><div class="form-row"><label>压缩包名称</label><input type="text" id="compressName" placeholder="archive.zip"></div><div class="actions"><button onclick="closeModal('compressModal')">取消</button><button class="primary" onclick="doCompress()">开始压缩</button></div></div></div>
 <div class="modal-bg" id="remoteModal"><div class="modal"><h3>远程文件下载</h3><div class="form-row"><label>文件 URL</label><input type="url" id="remoteUrl" placeholder="https://example.com/file.zip"></div><div class="progress-wrap" id="remoteProgressWrap" style="display:none;height:22px;border-radius:11px"><div class="fill" id="remoteProgressFill"></div></div><div id="remoteStatus" style="font-size:12px;color:#7a8299;margin-top:8px"></div><div class="actions"><button onclick="closeModal('remoteModal')">关闭</button><button onclick="downloadToLocal()">下载到本地</button><button class="primary" onclick="downloadToServer()">下载到服务器</button></div></div></div>
@@ -1521,9 +1830,9 @@ table.process-table tbody tr:hover .process-actions{opacity:1}
 
 <div class="token-panel" id="tokenPanel">
 <div class="user-topbar">
-<div class="u-title">🔑 远程命令接口</div>
+<div class="u-title"><svg class="ico" aria-hidden="true"><use href="#i-key"></use></svg>远程命令接口</div>
 <div class="u-stats" id="tokenStats"></div>
-<button onclick="closeTokenPanel()">✕ 关闭</button>
+<button onclick="closeTokenPanel()"><svg class="ico" aria-hidden="true"><use href="#i-close"></use></svg>关闭</button>
 </div>
 <div class="token-body">
 <div class="token-left" id="tokenLeft"></div>
@@ -1536,11 +1845,11 @@ table.process-table tbody tr:hover .process-actions{opacity:1}
 
 <div class="user-panel" id="userPanel">
 <div class="user-topbar">
-<div class="u-title">👤 用户管理</div>
+<div class="u-title"><svg class="ico" aria-hidden="true"><use href="#i-users"></use></svg>用户管理</div>
 <div class="u-stats" id="userStats"></div>
-<button id="btnAddUser" onclick="userForm('add')">＋ 添加用户</button>
-<button onclick="loadUsers()">🔄 刷新</button>
-<button onclick="closeUserPanel()">✕ 关闭</button>
+<button id="btnAddUser" onclick="userForm('add')"><svg class="ico" aria-hidden="true"><use href="#i-plus"></use></svg>添加用户</button>
+<button onclick="loadUsers()"><svg class="ico" aria-hidden="true"><use href="#i-refresh"></use></svg>刷新</button>
+<button onclick="closeUserPanel()"><svg class="ico" aria-hidden="true"><use href="#i-close"></use></svg>关闭</button>
 </div>
 <div class="user-body">
 <div class="user-list"><table class="user-table">
@@ -1556,13 +1865,13 @@ table.process-table tbody tr:hover .process-actions{opacity:1}
     <h3>选择上传方式</h3>
     <div class="mode-cards">
       <div class="mode-card default" onclick="chooseUploadMode('http')">
-        <div class="mode-icon">📤</div>
+        <div class="mode-icon"><svg class="ico" aria-hidden="true"><use href="#i-upload"></use></svg></div>
         <div class="mode-title">HTTP 分片上传</div>
         <div class="mode-desc">浏览器直传，支持断点续传<br>32MB 分片，6 并发</div>
         <div class="mode-badge">默认</div>
       </div>
       <div class="mode-card" onclick="chooseUploadMode('ftp')">
-        <div class="mode-icon">📁</div>
+        <div class="mode-icon"><svg class="ico" aria-hidden="true"><use href="#i-folder"></use></svg></div>
         <div class="mode-title">FTP 直传</div>
         <div class="mode-desc">复制链接到资源管理器<br>支持断点续传，速度更快</div>
         <div class="mode-badge">大文件推荐</div>
@@ -1582,9 +1891,9 @@ table.process-table tbody tr:hover .process-actions{opacity:1}
 
 <div class="modal-bg" id="ftpInfoModal">
   <div class="modal wide">
-    <h3>📁 FTP 直传</h3>
+    <h3><svg class="ico" aria-hidden="true"><use href="#i-server"></use></svg> FTP 直传</h3>
     <div class="ftp-link-box" id="ftpLinkBox" onclick="copyFtpLink()">
-      <span class="lbl">点此复制 → 粘贴到资源管理器地址栏</span>
+      <span class="lbl">点此复制，然后粘贴到资源管理器地址栏</span>
       <span id="ftpLinkText">ftp://...</span>
     </div>
     <div class="ftp-info-grid">
@@ -1595,15 +1904,15 @@ table.process-table tbody tr:hover .process-actions{opacity:1}
       <div style="grid-column:1/-1"><label>当前目录</label><span id="ftpCwd">/</span></div>
     </div>
     <div class="ftp-actions">
-      <button class="primary" onclick="copyFtpLink()">📋 复制 FTP 链接</button>
-      <button onclick="copyFtpInfo()">📋 复制账号信息</button>
-      <button onclick="copyFtpCmd()">📋 复制命令行</button>
+      <button class="primary" onclick="copyFtpLink()"><svg class="ico" aria-hidden="true"><use href="#i-copy"></use></svg>复制 FTP 链接</button>
+      <button onclick="copyFtpInfo()"><svg class="ico" aria-hidden="true"><use href="#i-copy"></use></svg>复制账号信息</button>
+      <button onclick="copyFtpCmd()"><svg class="ico" aria-hidden="true"><use href="#i-copy"></use></svg>复制命令行</button>
     </div>
     <div class="ftp-tip">
-      <b>📌 按场景推荐：</b><br>
+      <b><svg class="ico" aria-hidden="true"><use href="#i-pin"></use></svg>按场景推荐：</b><br>
       • <b>一般文件上传</b>：直接用 <b>Windows 资源管理器</b>（Win+E），把复制的 FTP 链接粘贴到地址栏，回车后拖拽文件即可，零安装最省事。<br>
       • <b>超大文件 / 需要断点续传</b>：推荐 <b>FileZilla</b> 或 <b>WinSCP</b>，支持断点续传、多线程并发、队列管理，断网后能自动恢复，是传输几十 GB 以上文件的首选。<br>
-      <span style="color:#a06000">⚠️ FTP 为明文协议，仅建议在内网/可信网络下使用。</span>
+      <span style="color:#a06000"><svg class="ico" aria-hidden="true"><use href="#i-alert"></use></svg>FTP 为明文协议，仅建议在内网/可信网络下使用。</span>
     </div>
     <div class="actions">
       <button class="primary" onclick="closeModal('ftpInfoModal')">关闭</button>
@@ -1622,14 +1931,15 @@ let previewPath='',upFile=null,upUid='',upAbort=false,upBytes=0,speedHist=[],act
 let termCwd='',termHist=[],termHistIdx=-1,curJobId=null,evtSrc=null,compActive=false,compItems=[],compIdx=-1;
 let procData=[],procSys={},procSortKey='cpu',procSortOrder='desc',procTimer=null,procKw='';
 let ftpInfo={enabled:false,host:'',port:2121,user:'',pass:'',passive_ports:''};
-let bgTaskTimer=null,bgTaskId=null;
+let bgTaskTimer=null,bgTaskId=null,upCloseTimer=null,uploadQueue=[],uploadQueueIdx=0,uploadTargetPath='',uploadRetry=null;
 const $=id=>document.getElementById(id);
+function ico(name,cls=''){return`<svg class="ico${cls?' '+cls:''}" aria-hidden="true"><use href="#i-${name}"></use></svg>`}
 function toast(msg,type=''){const el=document.createElement('div');el.className='toast '+type;el.textContent=msg;document.body.appendChild(el);setTimeout(()=>{el.style.opacity='0';el.style.transition='.3s'},2400);setTimeout(()=>el.remove(),2800)}
 function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function fmtSize(b){if(b<0)return'-';if(b<1024)return b+'B';if(b<1048576)return(b/1024).toFixed(1)+'KB';if(b<1073741824)return(b/1048576).toFixed(1)+'MB';return(b/1073741824).toFixed(2)+'GB'}
 function fmtTime(s){if(s<60)return s.toFixed(0)+'秒';if(s<3600)return(s/60).toFixed(0)+'分'+(s%60).toFixed(0)+'秒';return(s/3600).toFixed(1)+'小时'}
 function fmtBytes(n){n=Number(n)||0;const u=['B','KB','MB','GB','TB'];let i=0;while(n>=1024&&i<u.length-1){n/=1024;i++}return n.toFixed(i===0?0:1)+' '+u[i]}
-function fileIcon(it){if(it.is_dir)return'📁';const m={jpg:'🖼️',jpeg:'🖼️',png:'🖼️',gif:'🖼️',webp:'🖼️',svg:'🖼️',bmp:'🖼️',ico:'🖼️',avif:'🖼️',mp4:'🎬',avi:'🎬',mov:'🎬',mkv:'🎬',webm:'🎬',mp3:'🎵',wav:'🎵',flac:'🎵',zip:'🗜️',rar:'🗜️','7z':'🗜️',tar:'🗜️',gz:'🗜️',pdf:'📕',doc:'📘',docx:'📘',xls:'📗',xlsx:'📗',ppt:'📙',pptx:'📙',txt:'📄',md:'📄',json:'📄',js:'📜',ts:'📜',py:'🐍',html:'🌐',css:'🎨',exe:'⚙️',dll:'⚙️',bat:'⚙️',safetensors:'🧠',ckpt:'🧠',pt:'🧠',pth:'🧠'};return m[it.ext]||'📄'}
+function fileIcon(it){if(it.is_dir)return ico('folder');const m={jpg:'image',jpeg:'image',png:'image',gif:'image',webp:'image',svg:'image',bmp:'image',ico:'image',avif:'image',mp4:'video',avi:'video',mov:'video',mkv:'video',webm:'video',mp3:'music',wav:'music',flac:'music',ogg:'music',zip:'archive',rar:'archive','7z':'archive',tar:'archive',gz:'archive',pdf:'book',doc:'file-text',docx:'file-text',xls:'grid',xlsx:'grid',csv:'grid',ppt:'monitor',pptx:'monitor',txt:'file-text',md:'file-text',json:'file-text',js:'code',ts:'code',jsx:'code',tsx:'code',py:'code',html:'globe',htm:'globe',css:'code',exe:'cpu',dll:'cpu',bat:'terminal',cmd:'terminal',sh:'terminal',ps1:'terminal',safetensors:'cpu',ckpt:'cpu',pt:'cpu',pth:'cpu'};return ico(m[(it.ext||'').toLowerCase()]||'file')}
 const isImg=it=>!it.is_dir&&IMG_E.has(it.ext),isVid=it=>!it.is_dir&&VID_E.has(it.ext),isTxt=it=>!it.is_dir&&TXT_E.has(it.ext),isPrev=it=>isImg(it)||isVid(it)||isTxt(it);
 async function fretry(url,opt={},n=MAX_RETRY){for(let i=0;i<=n;i++){try{return await fetch(url,opt)}catch(e){if(i===n)throw e;await new Promise(r=>setTimeout(r,300*(i+1)))}}}
 function pUrl(p){return'/preview/'+p.split('/').map(encodeURIComponent).join('/')}
@@ -1641,12 +1951,21 @@ function closePreview(){$('previewModal').classList.remove('show');$('previewBod
 function downloadFromPreview(){if(previewPath)downloadFile(previewPath)}
 document.addEventListener('keydown',e=>{if(e.key==='Escape'&&$('previewModal').classList.contains('show'))closePreview()});
 $('previewModal').addEventListener('click',e=>{if(e.target.id==='previewModal'||e.target.classList.contains('preview-body'))closePreview()});
-function showRootModal(){$('rootInput').value=currentRoot;$('rootModal').classList.add('show');setTimeout(()=>{$('rootInput').focus();$('rootInput').select()},50)}
+function rootDisplay(){return currentRoot||'整台计算机'}
+function showRootModal(){
+  $('rootInput').value=currentRoot;
+  $('rootModal').classList.add('show');
+  setTimeout(()=>{$('rootInput').focus();$('rootInput').select()},50)
+}
+function pickRootDir(){
+  const start=$('rootInput').value.trim();
+  pickerOpen('选择根目录',abs=>{if(abs!=null)$('rootInput').value=abs||''},start,true);
+}
 async function doSetRoot(){const p=$('rootInput').value.trim();
 try{const r=await fretry('/api/set_root',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:p})});const d=await r.json();
-if(d.success){currentRoot=d.root;$('rootPathDisplay').textContent=currentRoot;closeModal('rootModal');toast('已切换','success');histStack=[''];histIdx=0;currentPath='';treeInit();load('')}else{toast(d.error||'失败','error')}}catch(e){toast(e.message,'error')}}
+if(d.success){currentRoot=d.root||'';$('rootPathDisplay').textContent=rootDisplay();closeModal('rootModal');toast('已切换','success');histStack=[''];histIdx=0;currentPath='';treeInit();load('')}else{toast(d.error||'失败','error')}}catch(e){toast(e.message,'error')}}
 async function apiList(p,kw=keyword,sb=sortBy,od=order){const r=await fretry(`/api/list?path=${encodeURIComponent(p)}&keyword=${encodeURIComponent(kw)}&sort_by=${sb}&order=${od}`);if(!r.ok)throw new Error('加载失败');return r.json()}
-async function loadInitRoot(){try{const r=await fretry('/api/get_root');const d=await r.json();currentRoot=d.root;$('rootPathDisplay').textContent=currentRoot}catch(e){}}
+async function loadInitRoot(){try{const r=await fretry('/api/get_root');const d=await r.json();currentRoot=d.root;$('rootPathDisplay').textContent=rootDisplay()}catch(e){}}
 async function loadPlat(){try{const r=await fretry('/api/terminal/platform');const d=await r.json();if(d.success){plat=d;$('terminalPlatform').textContent=d.name;$('terminalPrompt').textContent=d.os==='windows'?'>':'$';$('terminalInput').placeholder=d.os==='windows'?'输入命令（如 dir、ipconfig），按 Tab 补全...':'输入命令（如 ls、pwd），按 Tab 补全...'}}catch(e){}}
 async function loadFtpInfo(){try{const r=await fretry('/api/ftp/info');const d=await r.json();if(d.success)ftpInfo=d}catch(e){}}
 
@@ -1684,7 +2003,7 @@ function copyText(text,msg){
 }
 function copyFtpLink(){
     const url=`ftp://${ftpInfo.user}:${ftpInfo.pass}@${ftpInfo.host}:${ftpInfo.port}/${currentPath||''}`;
-    copyText(url,'FTP 链接已复制 → 粘贴到资源管理器地址栏');
+    copyText(url,'FTP 链接已复制，请粘贴到资源管理器地址栏');
 }
 function copyFtpInfo(){
     const text=`服务器: ${ftpInfo.host}\n端口: ${ftpInfo.port}\n用户名: ${ftpInfo.user}\n密码: ${ftpInfo.pass}\n当前目录: /${currentPath||''}`;
@@ -1702,10 +2021,10 @@ if(push){histStack=histStack.slice(0,histIdx+1);if(histStack[histStack.length-1]
  render();updCrumb();updNav();updStatus();updTermCwd();treeReveal()}catch(e){toast('加载失败: '+e.message,'error')}}
 function render(){const tb=$('fileList'),emp=$('emptyState');if(!currentItems.length){tb.innerHTML='';emp.style.display='block';return}emp.style.display='none';
 let h='';currentItems.forEach((it,idx)=>{const sel=selected.has(it.path)?'selected':'';const prev=isPrev(it);
-h+=`<tr class="${sel}" data-idx="${idx}" data-path="${esc(it.path)}"><td class="name-cell"><span class="file-icon">${fileIcon(it)}</span><span>${esc(it.name)}</span></td><td>${esc(it.mtime_str)}</td><td>${esc(it.size_str)}</td><td><div class="row-actions">${prev?`<button onclick="event.stopPropagation();openPreview(currentItems[${idx}])">查看</button>`:''}${it.is_dir?'':`<button onclick="event.stopPropagation();downloadFile('${esc(it.path)}')">下载</button>`}${it.ext==='zip'?`<button onclick="event.stopPropagation();extractOne('${esc(it.path)}')">解压</button>`:''}<button onclick="event.stopPropagation();showRename(currentItems[${idx}])">重命名</button><button class="danger" onclick="event.stopPropagation();deleteOne('${esc(it.path)}','${esc(it.name)}')">删除</button></div></td></tr>`});
+h+=`<tr class="${sel}" data-idx="${idx}" data-path="${esc(it.path)}"><td class="name-cell"><span class="file-icon">${fileIcon(it)}</span><span>${esc(it.name)}</span></td><td>${esc(it.mtime_str)}</td><td>${esc(it.size_str)}</td><td><div class="row-actions">${prev?`<button onclick="event.stopPropagation();openPreview(currentItems[${idx}])">查看</button>`:''}${`<button onclick="event.stopPropagation();downloadItem(currentItems[${idx}])"${it.is_dir?' title="打包为 ZIP 下载"':''}>下载</button>`}${it.ext==='zip'?`<button onclick="event.stopPropagation();extractOne('${esc(it.path)}')">解压</button>`:''}<button onclick="event.stopPropagation();showRename(currentItems[${idx}])">重命名</button><button class="danger" onclick="event.stopPropagation();deleteOne('${esc(it.path)}','${esc(it.name)}')">删除</button></div></td></tr>`});
 tb.innerHTML=h;tb.querySelectorAll('tr').forEach(tr=>{tr.addEventListener('click',onRowClick);tr.addEventListener('dblclick',onRowDblClick);tr.addEventListener('contextmenu',onRowCtx)});
-$('sortName').textContent=sortBy==='name'?(order==='asc'?'▲':'▼'):'';$('sortMtime').textContent=sortBy==='mtime'?(order==='asc'?'▲':'▼'):'';$('sortSize').textContent=sortBy==='size'?(order==='asc'?'▲':'▼'):''}
-function updCrumb(){const bc=$('breadcrumb');let h=`<span class="crumb ${currentPath===''?'current':''}" onclick="navigate('')">🏠 根目录</span>`;const parts=currentPath.split('/').filter(Boolean);let acc='';
+$('sortName').innerHTML=sortBy==='name'?ico(order==='asc'?'chevron-up':'chevron-down'):'';$('sortMtime').innerHTML=sortBy==='mtime'?ico(order==='asc'?'chevron-up':'chevron-down'):'';$('sortSize').innerHTML=sortBy==='size'?ico(order==='asc'?'chevron-up':'chevron-down'):''}
+function updCrumb(){const bc=$('breadcrumb');let h=`<span class="crumb ${currentPath===''?'current':''}" onclick="navigate('')">${ico('home')}根目录</span>`;const parts=currentPath.split('/').filter(Boolean);let acc='';
 parts.forEach((p,i)=>{acc+=(acc?'/':'')+p;const last=i===parts.length-1;h+=`<span class="sep">›</span>`;h+=last?`<span class="crumb current">${esc(p)}</span>`:`<span class="crumb" onclick="navigate('${esc(acc)}')">${esc(p)}</span>`});bc.innerHTML=h;bc.scrollLeft=bc.scrollWidth}
 function updNav(){$('btnBack').disabled=histIdx<=0;$('btnForward').disabled=histIdx>=histStack.length-1;$('btnUp').disabled=currentPath===''}
 function updStatus(){$('statusText').textContent=`共 ${currentItems.length} 项`;$('selectionText').textContent=selected.size?`已选中 ${selected.size} 项`:''}
@@ -1725,20 +2044,23 @@ function onRowDblClick(e){const it=currentItems[+e.currentTarget.dataset.idx];if
 function onRowCtx(e){e.preventDefault();const p=e.currentTarget.dataset.path;if(!selected.has(p)){selected.clear();selected.add(p);render();updStatus()}showCtxMenu(e.clientX,e.clientY,Array.from(selected))}
 function showCtxMenu(x,y,paths){const m=$('ctxMenu');const items=paths.map(p=>currentItems.find(i=>i.path===p)).filter(Boolean);
 const allZip=items.length>0&&items.every(i=>!i.is_dir&&i.ext==='zip');const single=items.length===1;
-let h='';if(single){const it=items[0];if(it.is_dir)h+=`<div class="item" onclick="ctxOpen()"><span class="icon">📂</span>打开</div>`;else{if(isPrev(it))h+=`<div class="item" onclick="ctxPreview()"><span class="icon">👁️</span>查看</div>`;h+=`<div class="item" onclick="ctxDownload()"><span class="icon">⬇️</span>下载</div>`}h+=`<div class="divider"></div>`}
-h+=`<div class="item" onclick="ctxCompress()"><span class="icon">🗜️</span>压缩为 ZIP</div>`;
-if(allZip)h+=`<div class="item" onclick="ctxExtract()"><span class="icon">📤</span>解压</div>`;
-h+=`<div class="divider"></div><div class="item" onclick="ctxCopyMove('copy')"><span class="icon">📋</span>复制到…</div><div class="item" onclick="ctxCopyMove('move')"><span class="icon">✂️</span>移动到…</div>`+
-   `<div class="item" onclick="ctxRename()"><span class="icon">✏️</span>重命名</div>`+
-   `<div class="item" onclick="ctxCopyName()"><span class="icon">🔤</span>复制名称</div>`+
-   `<div class="item" onclick="ctxCopyPath()"><span class="icon">📍</span>复制绝对路径</div>`+
-   `<div class="divider"></div><div class="item danger" onclick="ctxDelete()"><span class="icon">🗑️</span>删除</div>`;
+let h='';if(single){const it=items[0];if(it.is_dir)h+=`<div class="item" onclick="ctxOpen()"><span class="icon">${ico('folder-open')}</span>打开</div><div class="item" onclick="ctxDownload()"><span class="icon">${ico('download')}</span>打包下载</div>`;else{if(isPrev(it))h+=`<div class="item" onclick="ctxPreview()"><span class="icon">${ico('eye')}</span>查看</div>`;h+=`<div class="item" onclick="ctxDownload()"><span class="icon">${ico('download')}</span>下载</div>`}h+=`<div class="divider"></div>`}
+h+=`<div class="item" onclick="ctxCompress()"><span class="icon">${ico('archive')}</span>压缩为 ZIP</div>`;
+if(allZip)h+=`<div class="item" onclick="ctxExtract()"><span class="icon">${ico('package')}</span>解压</div>`;
+h+=`<div class="divider"></div><div class="item" onclick="ctxCopyMove('copy')"><span class="icon">${ico('copy')}</span>复制到…</div><div class="item" onclick="ctxCopyMove('move')"><span class="icon">${ico('move')}</span>移动到…</div>`+
+   `<div class="item" onclick="ctxRename()"><span class="icon">${ico('edit')}</span>重命名</div>`+
+   `<div class="item" onclick="ctxCopyName()"><span class="icon">${ico('file-text')}</span>复制名称</div>`+
+   `<div class="item" onclick="ctxCopyPath()"><span class="icon">${ico('link')}</span>复制绝对路径</div>`+
+   `<div class="divider"></div><div class="item" onclick="ctxRefresh()"><span class="icon">${ico('refresh')}</span>刷新</div>`+
+   `<div class="item danger" onclick="ctxDelete()"><span class="icon">${ico('trash')}</span>删除</div>`;
 m.innerHTML=h;m.classList.add('show');const r=m.getBoundingClientRect();m.style.left=Math.min(x,innerWidth-r.width-8)+'px';m.style.top=Math.min(y,innerHeight-r.height-8)+'px'}
+function showCtxMenuEmpty(x,y){const m=$('ctxMenu');m.innerHTML=`<div class="item" onclick="ctxRefresh()"><span class="icon">${ico('refresh')}</span>刷新</div>`;m.classList.add('show');const r=m.getBoundingClientRect();m.style.left=Math.min(x,innerWidth-r.width-8)+'px';m.style.top=Math.min(y,innerHeight-r.height-8)+'px'}
 document.addEventListener('click',()=>$('ctxMenu').classList.remove('show'));
 document.addEventListener('scroll',()=>$('ctxMenu').classList.remove('show'),true);
+$('fileArea').addEventListener('contextmenu',e=>{if(e.target.closest('tr'))return;e.preventDefault();selected.clear();render();updStatus();showCtxMenuEmpty(e.clientX,e.clientY)});
 function ctxOpen(){const it=currentItems.find(i=>i.path===Array.from(selected)[0]);if(it&&it.is_dir)navigate(it.path)}
 function ctxPreview(){const it=currentItems.find(i=>i.path===Array.from(selected)[0]);if(it&&isPrev(it))openPreview(it)}
-function ctxDownload(){Array.from(selected).forEach(p=>downloadFile(p))}
+function ctxDownload(){Array.from(selected).forEach(p=>{const it=currentItems.find(i=>i.path===p);if(it)downloadItem(it)})}
 function ctxDelete(){deleteMany(Array.from(selected))}
 async function ctxCompress(){$('compressName').value='archive.zip';$('compressModal').classList.add('show');$('compressName').focus();$('compressName').select();window._cp=Array.from(selected)}
 async function ctxExtract(){const ps=Array.from(selected);try{const r=await fretry('/api/extract',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({paths:ps,target:currentPath})});const d=await r.json();if(d.success){toast(`已解压 ${d.results.filter(x=>x.success).length}/${ps.length}`,'success');refresh()}else toast(d.error||'失败','error')}catch(e){toast(e.message,'error')}}
@@ -1748,6 +2070,7 @@ function curOne(){return currentItems.find(i=>i.path===Array.from(selected)[0])}
 function ctxRename(){const it=curOne();if(it)showRename(it)}
 function ctxCopyName(){const it=curOne();if(it)copyText(it.name,'已复制名称')}
 function ctxCopyPath(){const it=curOne();if(it)copyText(it.abs||it.path,'已复制绝对路径')}
+function ctxRefresh(){$('ctxMenu').classList.remove('show');refresh()}
 
 async function startBgTask(paths,target,operation){
     try{
@@ -1763,11 +2086,12 @@ function showBgPanel(operation,count){
     const p=$('uploadPanel');
     p.classList.remove('collapsed','done');
     p.classList.add('show');
-    $('uploadTitleIcon').textContent=operation==='copy'?'📋':'✂️';
+    $('uploadTitleIcon').innerHTML=ico(operation==='copy'?'copy':'cut');
     $('uploadTitleText').textContent=operation==='copy'?'复制中':'移动中';
     $('uploadFileName').textContent=`— ${count} 项`;
     $('uploadProgressWrap').classList.add('bg-task');
     $('btnCancelUpload').style.display='none';
+    $('btnRetryUpload').style.display='none';
     $('uploadSpeed').textContent='--';
     $('remainingTime').textContent='--';
     $('currentChunk').textContent='--';
@@ -1789,14 +2113,15 @@ function startBgPolling(){
             if(d.status==='completed'||d.status==='failed'){
                 clearInterval(bgTaskTimer);bgTaskTimer=null;
                 $('btnCancelUpload').style.display='none';
-                $('uploadTitleIcon').textContent='✓';
+                $('uploadTitleIcon').innerHTML=ico('check');
                 if(d.status==='completed'){
                     toast(`${d.type==='copy'?'复制':'移动'}完成 ${d.done}/${d.total} 项`,'success');
                     if(d.errors&&d.errors.length)toast(d.errors[0],'error');
                 }else{
                     toast(d.message||'失败','error');
                 }
-                setTimeout(()=>{closeUploadPanel();refresh()},2000);
+                refresh();
+                setTimeout(()=>closeUploadPanel(),2000);
                 bgTaskId=null;
             }
         }catch(e){}
@@ -1806,6 +2131,7 @@ function startBgPolling(){
 async function deleteOne(p,n){if(!confirm(`确定删除「${n}」？`))return;deleteMany([p])}
 async function deleteMany(ps){try{const r=await fretry('/api/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({paths:ps})});const d=await r.json();if(d.success){if(d.deleted.length)toast(`已删除 ${d.deleted.length} 项`,'success');if(d.errors?.length)toast(d.errors[0],'error');refresh()}else toast(d.error||'失败','error')}catch(e){toast(e.message,'error')}}
 function downloadFile(p){window.location.href='/download/'+encodeURIComponent(p)}
+function downloadItem(it){if(!it)return;if(it.is_dir)window.location.href='/download_zip/'+it.path.split('/').map(encodeURIComponent).join('/');else downloadFile(it.path)}
 function showMkdir(){$('mkdirName').value='';$('mkdirModal').classList.add('show');$('mkdirName').focus()}
 async function doMkdir(){const n=$('mkdirName').value.trim();if(!n){toast('请输入名称','error');return}
 try{const r=await fretry('/api/mkdir',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:currentPath,name:n})});const d=await r.json();if(d.success){toast('成功','success');closeModal('mkdirModal');refresh()}else toast(d.error||'失败','error')}catch(e){toast(e.message,'error')}}
@@ -1819,26 +2145,37 @@ const fileArea=$('fileArea');
 ['dragleave','drop'].forEach(ev=>fileArea.addEventListener(ev,e=>{e.preventDefault();fileArea.classList.remove('dragover')}));
 fileArea.addEventListener('drop',e=>{if(e.dataTransfer.files.length)handleUpload(e.dataTransfer.files)});
 $('fileInput').addEventListener('change',e=>{if(e.target.files.length){handleUpload(e.target.files);e.target.value=''}});
-function showUpPanel(fn){const p=$('uploadPanel');p.classList.remove('collapsed','done');p.classList.add('show');$('uploadTitleIcon').textContent='⬆';$('uploadTitleText').textContent='上传进度';$('uploadFileName').textContent=fn?`— ${fn}`:'';$('btnCancelUpload').style.display='';$('uploadProgressWrap').classList.remove('bg-task')}
+function showUpPanel(fn){if(upCloseTimer){clearTimeout(upCloseTimer);upCloseTimer=null}uploadRetry=null;const p=$('uploadPanel');p.classList.remove('collapsed','done');p.classList.add('show');$('uploadTitleIcon').innerHTML=ico('upload');$('uploadTitleText').textContent='上传进度';$('uploadFileName').textContent=fn?`— ${fn}`:'';$('btnCancelUpload').style.display='';$('btnRetryUpload').style.display='none';$('uploadProgressWrap').classList.remove('bg-task')}
 function toggleUploadPanel(e){if(e&&e.target.closest('.close-btn'))return;$('uploadPanel').classList.toggle('collapsed')}
-function closeUploadPanel(e){if(e)e.stopPropagation();$('uploadPanel').classList.remove('show')}
-function markUpDone(){$('uploadPanel').classList.add('done');$('uploadTitleIcon').textContent='✓';$('btnCancelUpload').style.display='none'}
-async function handleUpload(files){for(const f of files)await upOne(f);refresh()}
-async function upOne(f){upFile=f;upUid=genUid();upAbort=false;upBytes=0;speedHist=[];activeChunks.clear();showUpPanel(f.name);
+function closeUploadPanel(e){if(e)e.stopPropagation();if(upCloseTimer){clearTimeout(upCloseTimer);upCloseTimer=null}$('uploadPanel').classList.remove('show')}
+function markUpDone(){$('uploadPanel').classList.add('done');$('uploadTitleIcon').innerHTML=ico('check');$('uploadTitleText').textContent='上传成功';$('btnCancelUpload').style.display='none';$('btnRetryUpload').style.display='none'}
+function markUploadFailed(msg,name){const p=$('uploadPanel');p.classList.remove('collapsed');p.classList.add('show','done');$('uploadTitleIcon').innerHTML=ico('alert');$('uploadTitleText').textContent='上传失败';$('uploadFileName').textContent='— '+(name?name+'：':'')+(msg||'可重试续传');$('btnCancelUpload').style.display='none';$('btnRetryUpload').style.display=''}
+function markUploadCancelled(){uploadRetry=null;$('uploadPanel').classList.add('done');$('uploadTitleIcon').innerHTML=ico('close');$('uploadTitleText').textContent='已取消';$('uploadFileName').textContent='— 已取消';$('btnCancelUpload').style.display='none';$('btnRetryUpload').style.display='none'}
+async function handleUpload(files){uploadQueue=Array.from(files);uploadQueueIdx=0;uploadTargetPath=currentPath;await processUploadQueue()}
+async function processUploadQueue(){while(uploadQueueIdx<uploadQueue.length){const f=uploadQueue[uploadQueueIdx];const ok=await upOne(f,null,uploadTargetPath);if(!ok)return;uploadQueueIdx++}uploadQueue=[];uploadQueueIdx=0;uploadTargetPath=''}
+async function upOne(f,resumeUid,targetPath){
+upFile=f;upUid=resumeUid||genUid();const target=targetPath!==undefined?targetPath:currentPath;
+upAbort=false;upBytes=0;speedHist=[];activeChunks.clear();showUpPanel(f.name);
 $('uploadProgressFill').style.width='0%';$('uploadedSize').textContent='0B';$('totalSize').textContent=fmtSize(f.size);$('uploadSpeed').textContent='0 KB/s';$('remainingTime').textContent='--';$('currentChunk').textContent='0';$('totalChunks').textContent=Math.ceil(f.size/CHUNK_SIZE);
 const total=Math.ceil(f.size/CHUNK_SIZE);let up=[];try{const r=await fretry(`/check_chunks?file_uid=${upUid}`);const d=await r.json();up=d.uploaded_chunks||[]}catch(e){}
 upBytes=up.length*CHUNK_SIZE;if(upBytes>f.size)upBytes=f.size;updProg();
 const pend=[];for(let i=0;i<total;i++)if(!up.includes(i))pend.push(i);
 let fin=0,cur=0,failed=null;
 async function worker(){while(true){if(upAbort)throw new Error('已取消');if(failed)throw failed;const idx=cur++;if(idx>=pend.length)return;const i=pend[idx];const s=i*CHUNK_SIZE,e=Math.min(s+CHUNK_SIZE,f.size);const blob=f.slice(s,e);
-try{const res=await upChunkRetry(i,blob);if(!res.success)throw new Error(`分片 ${i+1} 失败: ${res.message}`);fin++}catch(err){failed=err;throw err}}}
+try{const res=await upChunkRetry(i,blob,target);if(!res.success)throw new Error(`分片 ${i+1} 失败: ${res.message}`);fin++;upBytes+=blob.size;updProg()}catch(err){failed=err;throw err}}}
 try{const ws=[];for(let k=0;k<CONCURRENCY;k++)ws.push(worker());await Promise.all(ws);
-const mr=await fretry('/merge_chunks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({file_uid:upUid,file_name:f.name,total_chunks:total,current_path:currentPath})});const md=await mr.json();
-if(md.success){$('uploadProgressFill').style.width='100%';$('uploadProgressFill').textContent='100%';markUpDone();$('uploadFileName').textContent=`— ${f.name} 成功`;toast(`「${f.name}」成功`,'success');setTimeout(()=>{closeUploadPanel();refresh()},1500)}else throw new Error(md.message)}
-catch(e){$('uploadFileName').textContent='— 上传失败';markUpDone();toast('失败: '+e.message,'error')}}
-async function upChunkRetry(idx,blob){for(let a=0;a<=MAX_RETRY;a++){if(upAbort)return{success:false,message:'已取消'};const r=await upChunk(idx,blob);if(r.success)return r;if(a<MAX_RETRY)await new Promise(rs=>setTimeout(rs,800*(a+1)));else return r}}
-function upChunk(idx,blob){return new Promise(res=>{if(upAbort){res({success:false,message:'已取消'});return}
-const fd=new FormData();fd.append('file_uid',upUid);fd.append('chunk_index',idx);fd.append('total_chunks',Math.ceil(upFile.size/CHUNK_SIZE));fd.append('file_name',upFile.name);fd.append('current_path',currentPath);fd.append('chunk',blob);
+const mr=await fretry('/merge_chunks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({file_uid:upUid,file_name:f.name,total_chunks:total,current_path:target})});const md=await mr.json();
+if(md.success){$('uploadProgressFill').style.width='100%';$('uploadProgressFill').textContent='100%';$('uploadedSize').textContent=fmtSize(f.size);$('remainingTime').textContent='0秒';$('currentChunk').textContent=total;$('totalChunks').textContent=total;markUpDone();$('uploadFileName').textContent=`— ${f.name} 成功`;toast(`「${f.name}」成功`,'success');refresh();upCloseTimer=setTimeout(()=>{closeUploadPanel();upCloseTimer=null},1500);return true}
+throw new Error(md.message)}
+catch(e){const msg=(e&&e.message)?e.message:String(e);
+if(upAbort||msg.includes('已取消')){markUploadCancelled();return false}
+markUploadFailed(msg,f.name);uploadRetry={file:f,uid:upUid,path:target};toast(`「${f.name}」上传失败: ${msg}`,'error');return false}}
+async function retryUpload(){const ctx=uploadRetry;if(!ctx)return;uploadRetry=null;$('btnRetryUpload').style.display='none';
+const ok=await upOne(ctx.file,ctx.uid,ctx.path);
+if(ok&&uploadQueue.length&&uploadQueue[uploadQueueIdx]===ctx.file){uploadQueueIdx++;await processUploadQueue()}}
+async function upChunkRetry(idx,blob,target){for(let a=0;a<=MAX_RETRY;a++){if(upAbort)return{success:false,message:'已取消'};const r=await upChunk(idx,blob,target);if(r.success)return r;if(a<MAX_RETRY)await new Promise(rs=>setTimeout(rs,800*(a+1)));else return r}}
+function upChunk(idx,blob,target){return new Promise(res=>{if(upAbort){res({success:false,message:'已取消'});return}
+const fd=new FormData();fd.append('file_uid',upUid);fd.append('chunk_index',idx);fd.append('total_chunks',Math.ceil(upFile.size/CHUNK_SIZE));fd.append('file_name',upFile.name);fd.append('current_path',target);fd.append('chunk',blob);
 $('currentChunk').textContent=idx+1;const xhr=new XMLHttpRequest();let ll=0,lt=Date.now();xhr.timeout=600000;
 xhr.upload.onprogress=e=>{if(!e.lengthComputable)return;activeChunks.set(idx,e.loaded);const now=Date.now(),dt=(now-lt)/1000;
 if(dt>=0.3){const sp=(e.loaded-ll)/dt/1024;speedHist.push(sp);if(speedHist.length>10)speedHist.shift();updProg();ll=e.loaded;lt=now}};
@@ -1850,8 +2187,8 @@ xhr.open('POST','/upload_chunk');xhr.send(fd)})}
 function updProg(){let at=0;activeChunks.forEach(v=>at+=v);const c=Math.min(upBytes+at,upFile.size);const pct=upFile.size?c/upFile.size*100:0;
 $('uploadProgressFill').style.width=pct+'%';$('uploadProgressFill').textContent=pct.toFixed(1)+'%';$('uploadedSize').textContent=fmtSize(c);
 if(speedHist.length){const avg=speedHist.reduce((a,b)=>a+b,0)/speedHist.length;$('uploadSpeed').textContent=avg.toFixed(0)+' KB/s';$('remainingTime').textContent=fmtTime((upFile.size-c)/(avg*1024))}}
-function cancelUpload(){upAbort=true;markUpDone();$('uploadFileName').textContent='— 已取消'}
-function genUid(){const t=Date.now(),r=Math.random().toString(36).substring(2,10);return btoa(t+'_'+r+'_'+upFile.name).replace(/[^a-zA-Z0-9]/g,'').substring(0,32)}
+function cancelUpload(){upAbort=true;uploadQueue=[];uploadQueueIdx=0;uploadTargetPath='';markUploadCancelled()}
+function genUid(){const t=Date.now().toString(36),r=Math.random().toString(36).slice(2,10),n=(upFile&&upFile.name||'').replace(/[^a-zA-Z0-9]/g,'').slice(0,8);return(t+r+n).slice(0,32)}
 function showRemoteDownload(){$('remoteUrl').value='';$('remoteStatus').textContent='';$('remoteProgressWrap').style.display='none';$('remoteModal').classList.add('show')}
 let remoteTimer=null;
 async function downloadToServer(){const u=$('remoteUrl').value.trim();if(!u){toast('请输入URL','error');return}
@@ -1869,7 +2206,7 @@ function toggleTerminal(e){
     $('btnTerminal').classList.toggle('active',open);
     if(open)setTimeout(()=>$('terminalInput').focus(),260);
 }
-function updTermCwd(){termCwd=currentPath;const sep=plat.os==='windows'?'\\':'/';$('terminalCwdDisplay').textContent=termCwd?currentRoot.replace(/\//g,sep)+sep+termCwd.replace(/\//g,sep):currentRoot.replace(/\//g,sep)}
+function updTermCwd(){termCwd=currentPath;const sep=plat.os==='windows'?'\\':'/';const base=rootDisplay().replace(/\//g,sep);const p=termCwd?(currentRoot?(base.replace(/[\\/]+$/,'')+sep+termCwd.replace(/\//g,sep)):termCwd.replace(/\//g,sep)):base;$('terminalCwdDisplay').textContent=p}
 function clearTerminal(){$('terminalOutput').innerHTML=''}
 function tApp(text,cls=''){const o=$('terminalOutput');const d=document.createElement('div');d.className=cls;d.textContent=text;o.appendChild(d);o.scrollTop=o.scrollHeight}
 function tAppRaw(t){const o=$('terminalOutput');o.appendChild(document.createTextNode(t));o.scrollTop=o.scrollHeight}
@@ -1902,7 +2239,7 @@ function applyComp(inp,c){const cur=inp.selectionStart,before=inp.value.substrin
 let nt,np;if(lastSp===-1){nt=c+inp.value.substring(cur);np=c.length}else{const pre=inp.value.substring(0,lastSp+1),suf=inp.value.substring(cur);nt=pre+c+suf;np=pre.length+c.length}
 inp.value=nt;inp.selectionStart=inp.selectionEnd=np}
 function showComp(items){const p=$('completionPopup');compItems=items;compIdx=0;compActive=true;
-$('completionList').innerHTML=items.map((it,i)=>{const d=it.endsWith('/')||it.endsWith('\\'),f=it.startsWith('-')||it.startsWith('/');const ic=d?'📁':(f?'⚙️':'📄');return`<div class="completion-item ${i===0?'active':''}" data-i="${i}" onclick="selComp(${i})"><span class="cmd-icon">${ic}</span><span>${esc(it)}</span></div>`}).join('');
+$('completionList').innerHTML=items.map((it,i)=>{const d=it.endsWith('/')||it.endsWith('\\'),f=it.startsWith('-')||it.startsWith('/');const ic=d?'folder':(f?'cpu':'file');return`<div class="completion-item ${i===0?'active':''}" data-i="${i}" onclick="selComp(${i})"><span class="cmd-icon">${ico(ic)}</span><span>${esc(it)}</span></div>`}).join('');
 p.classList.add('show')}
 function selComp(i){applyComp($('terminalInput'),compItems[i]);hideComp();$('terminalInput').focus()}
 function hideComp(){$('completionPopup').classList.remove('show');compActive=false;compItems=[];compIdx=-1}
@@ -1927,60 +2264,60 @@ tApp(`远程命令面板 [${plat.name}]`,'info-line');
 if(w){
     const help=document.createElement('div');
     help.innerHTML=`
-<div style="color:#ffd94a;font-weight:600;margin-top:8px">📦 压缩 / 解压</div>
+<div style="color:#ffd94a;font-weight:600;margin-top:8px">${ico('archive')} 压缩 / 解压</div>
 <div class="hint-line">ZIP 压缩：&nbsp;${hint('', 'Compress-Archive -Path .\\folder -DestinationPath archive.zip')}</div>
 <div class="hint-line">ZIP 解压：&nbsp;${hint('', 'Expand-Archive -Path archive.zip -DestinationPath .\\out')}</div>
 <div class="hint-line">7z 压缩：&nbsp;${hint('', '7z a archive.7z .\\folder')}</div>
 <div class="hint-line">7z 解压：&nbsp;${hint('', '7z x archive.7z -o.\\out')}</div>
 <div class="hint-line">tar 打包：&nbsp;${hint('', 'tar -czf archive.tar.gz .\\folder')}</div>
 <div class="hint-line">tar 解包：&nbsp;${hint('', 'tar -xzf archive.tar.gz')}</div>
-<div style="color:#ffd94a;font-weight:600;margin-top:8px">🌐 端口 / 网络</div>
+<div style="color:#ffd94a;font-weight:600;margin-top:8px">${ico('globe')} 端口 / 网络</div>
 <div class="hint-line">查端口占用：&nbsp;${hint('', 'netstat -ano | findstr :{{ http_port }}')}</div>
 <div class="hint-line">查全部监听：&nbsp;${hint('', 'netstat -ano | findstr LISTENING')}</div>
 <div class="hint-line">按 PID 查进程：&nbsp;${hint('', 'tasklist | findstr 12345')}</div>
 <div class="hint-line">查 IP 配置：&nbsp;${hint('', 'ipconfig /all')}</div>
 <div class="hint-line">测试连通：&nbsp;${hint('', 'ping -n 4 8.8.8.8')}</div>
-<div style="color:#ffd94a;font-weight:600;margin-top:8px">🗑️ 强制删除</div>
+<div style="color:#ffd94a;font-weight:600;margin-top:8px">${ico('trash')} 强制删除</div>
 <div class="hint-line">强删文件：&nbsp;${hint('', 'del /f /q file.txt')}</div>
 <div class="hint-line">强删目录：&nbsp;${hint('', 'rmdir /s /q .\\folder')}</div>
 <div class="hint-line">递归强删：&nbsp;${hint('', 'del /f /s /q .\\folder\\*')}</div>
-<div style="color:#ffd94a;font-weight:600;margin-top:8px">🔍 文件 / 目录</div>
+<div style="color:#ffd94a;font-weight:600;margin-top:8px">${ico('search')} 文件 / 目录</div>
 <div class="hint-line">列目录：&nbsp;${hint('', 'dir /a /o:g')}</div>
 <div class="hint-line">递归查找：&nbsp;${hint('', 'dir /s /b *.log')}</div>
 <div class="hint-line">文本搜索：&nbsp;${hint('', 'findstr /s /i "keyword" *.txt')}</div>
-<div style="color:#ffd94a;font-weight:600;margin-top:8px">⚙️ 进程</div>
+<div style="color:#ffd94a;font-weight:600;margin-top:8px">${ico('cpu')} 进程</div>
 <div class="hint-line">列进程：&nbsp;${hint('', 'tasklist')}</div>
 <div class="hint-line">按名强杀：&nbsp;${hint('', 'taskkill /f /im notepad.exe')}</div>
 <div class="hint-line">按 PID 强杀：&nbsp;${hint('', 'taskkill /f /pid 12345')}</div>
-<div style="color:#7a8299;margin-top:10px;font-size:11px">💡 点击绿色命令可自动填入输入框 &nbsp;|&nbsp; Tab 补全 / ↑↓ 历史 / Enter 执行</div>`;
+<div style="color:#7a8299;margin-top:10px;font-size:11px">${ico('bulb')} 点击绿色命令可自动填入输入框 &nbsp;|&nbsp; Tab 补全 / 上下键历史 / Enter 执行</div>`;
     $('terminalOutput').appendChild(help);
 }else{
     const help=document.createElement('div');
     help.innerHTML=`
-<div style="color:#ffd94a;font-weight:600;margin-top:8px">📦 压缩 / 解压</div>
+<div style="color:#ffd94a;font-weight:600;margin-top:8px">${ico('archive')} 压缩 / 解压</div>
 <div class="hint-line">ZIP 压缩：&nbsp;${hint('', 'zip -r archive.zip folder/')}</div>
 <div class="hint-line">ZIP 解压：&nbsp;${hint('', 'unzip archive.zip -d out/')}</div>
 <div class="hint-line">7z 压缩：&nbsp;${hint('', '7z a archive.7z folder/')}</div>
 <div class="hint-line">7z 解压：&nbsp;${hint('', '7z x archive.7z -oout/')}</div>
 <div class="hint-line">tar 打包：&nbsp;${hint('', 'tar -czf archive.tar.gz folder/')}</div>
 <div class="hint-line">tar 解包：&nbsp;${hint('', 'tar -xzf archive.tar.gz')}</div>
-<div style="color:#ffd94a;font-weight:600;margin-top:8px">🌐 端口 / 网络</div>
+<div style="color:#ffd94a;font-weight:600;margin-top:8px">${ico('globe')} 端口 / 网络</div>
 <div class="hint-line">查端口：&nbsp;${hint('', 'ss -tulnp | grep {{ http_port }}')}</div>
 <div class="hint-line">或：&nbsp;${hint('', 'netstat -tulnp | grep {{ http_port }}')}</div>
 <div class="hint-line">查 IP：&nbsp;${hint('', 'ip addr show')}</div>
 <div class="hint-line">测试连通：&nbsp;${hint('', 'ping -c 4 8.8.8.8')}</div>
-<div style="color:#ffd94a;font-weight:600;margin-top:8px">🗑️ 强制删除</div>
+<div style="color:#ffd94a;font-weight:600;margin-top:8px">${ico('trash')} 强制删除</div>
 <div class="hint-line">强删文件：&nbsp;${hint('', 'rm -f file.txt')}</div>
 <div class="hint-line">强删目录：&nbsp;${hint('', 'rm -rf folder/')}</div>
-<div style="color:#ffd94a;font-weight:600;margin-top:8px">🔍 文件 / 目录</div>
+<div style="color:#ffd94a;font-weight:600;margin-top:8px">${ico('search')} 文件 / 目录</div>
 <div class="hint-line">列目录：&nbsp;${hint('', 'ls -lah')}</div>
 <div class="hint-line">递归查找：&nbsp;${hint('', 'find . -name "*.log"')}</div>
 <div class="hint-line">文本搜索：&nbsp;${hint('', 'grep -rn "keyword" .')}</div>
 <div class="hint-line">磁盘占用：&nbsp;${hint('', 'df -h')}</div>
-<div style="color:#ffd94a;font-weight:600;margin-top:8px">⚙️ 进程</div>
+<div style="color:#ffd94a;font-weight:600;margin-top:8px">${ico('cpu')} 进程</div>
 <div class="hint-line">列进程：&nbsp;${hint('', 'ps aux')}</div>
 <div class="hint-line">强杀：&nbsp;${hint('', 'kill -9 12345')}</div>
-<div style="color:#7a8299;margin-top:10px;font-size:11px">💡 点击绿色命令可自动填入输入框 &nbsp;|&nbsp; Tab 补全 / ↑↓ 历史 / Enter 执行</div>`;
+<div style="color:#7a8299;margin-top:10px;font-size:11px">${ico('bulb')} 点击绿色命令可自动填入输入框 &nbsp;|&nbsp; Tab 补全 / 上下键历史 / Enter 执行</div>`;
     $('terminalOutput').appendChild(help);
 }
 $('terminalOutput').scrollTop=0;}
@@ -2004,7 +2341,7 @@ let arr=procData.slice();
 if(kw)arr=arr.filter(p=>(p.name||'').toLowerCase().includes(kw)||String(p.pid).includes(kw)||(p.command||'').toLowerCase().includes(kw));
 const k=procSortKey,o=procSortOrder==='desc'?-1:1;
 arr.sort((a,b)=>{const va=a[k]??0,vb=b[k]??0;if(typeof va==='string')return va.localeCompare(vb)*o;return(va-vb)*o});
-document.querySelectorAll('.process-table .sort-arrow').forEach(el=>{el.textContent=el.dataset.key===k?(procSortOrder==='asc'?'▲':'▼'):''});
+document.querySelectorAll('.process-table .sort-arrow').forEach(el=>{el.innerHTML=el.dataset.key===k?ico(procSortOrder==='asc'?'chevron-up':'chevron-down'):''});
 const tbody=$('processList');let h='';
 arr.forEach(p=>{const cpu=p.cpu||0;const cpuCls=cpu<1?'cpu-low':cpu<10?'cpu-mid':'cpu-high';
 const prot=isProtected(p.name);
@@ -2081,17 +2418,17 @@ async function treeEnsure(kids,tog,path,factory){
     else dirs.forEach(d=>kids.appendChild(factory(d.path,d.name)));
     kids.dataset.loaded='1';
   }
-  kids.style.display='';tog.textContent='▾';
+  kids.style.display='';tog.innerHTML=ico('chevron-down');
 }
 function treeToggle(kids,tog,path,factory){
   if(kids.style.display==='none')treeEnsure(kids,tog,path,factory);
-  else{kids.style.display='none';tog.textContent='▸'}
+  else{kids.style.display='none';tog.innerHTML=ico('chevron-right')}
 }
 function treeNode(path,name){
   const wrap=document.createElement('div');wrap.className='tree-node';
   const row=document.createElement('div');row.className='tree-row';row.dataset.path=path;
-  const tog=document.createElement('span');tog.className='tree-tog';tog.textContent='▸';
-  const lbl=document.createElement('span');lbl.className='tree-label';lbl.textContent=name||'🏠 根目录';lbl.title=path||'/';
+  const tog=document.createElement('span');tog.className='tree-tog';tog.innerHTML=ico('chevron-right');
+  const lbl=document.createElement('span');lbl.className='tree-label';lbl.innerHTML=(name?ico('folder'):ico('home'))+'<span>'+(name?esc(name):'根目录')+'</span>';lbl.title=path||'/';
   const kids=document.createElement('div');kids.className='tree-kids';kids.style.display='none';
   row.appendChild(tog);row.appendChild(lbl);wrap.appendChild(row);wrap.appendChild(kids);
   tog.onclick=ev=>{ev.stopPropagation();treeToggle(kids,tog,path,treeNode)};
@@ -2101,7 +2438,7 @@ function treeNode(path,name){
   return wrap;
 }
 async function treeInit(){treeAllMode=false;for(const k in treeIndex)delete treeIndex[k];
-  const box=$('treeRoot');if(!box)return;box.innerHTML='';box.appendChild(treeNode('','🏠 根目录'));
+  const box=$('treeRoot');if(!box)return;box.innerHTML='';box.appendChild(treeNode('',''));
   const n=treeIndex[''];if(n)await treeEnsure(n.kids,n.tog,'',treeNode);treeMark()}
 function treeMark(){document.querySelectorAll('#treeRoot .tree-row.active').forEach(e=>e.classList.remove('active'));
   const n=treeIndex[currentPath];if(n)n.row.classList.add('active')}
@@ -2114,8 +2451,8 @@ let pickerMulti=false,pickerSel=new Set();
 function pickerNode(path,name){
   const wrap=document.createElement('div');wrap.className='tree-node';
   const row=document.createElement('div');row.className='tree-row';row.dataset.path=path;
-  const tog=document.createElement('span');tog.className='tree-tog';tog.textContent='▸';
-  const lbl=document.createElement('span');lbl.className='tree-label';lbl.textContent=name||'🏠 根目录';lbl.title=path||'/';
+  const tog=document.createElement('span');tog.className='tree-tog';tog.innerHTML=ico('chevron-right');
+  const lbl=document.createElement('span');lbl.className='tree-label';lbl.innerHTML=(name?ico('folder'):ico('home'))+'<span>'+(name?esc(name):'根目录')+'</span>';lbl.title=path||'/';
   const kids=document.createElement('div');kids.className='tree-kids';kids.style.display='none';
   row.appendChild(tog);row.appendChild(lbl);wrap.appendChild(row);wrap.appendChild(kids);
   tog.onclick=ev=>{ev.stopPropagation();treeToggle(kids,tog,path,pickerNode)};
@@ -2147,7 +2484,7 @@ async function pickerOpen(title,cb,start,whole,multi){
   pickerSel=new Set(multi?(Array.isArray(start)?start:(start?[start]:[])):[]);
   pickerCb=cb;pickerTarget=multi?'':(start||'');pickerIdx={};treeAllMode=!!whole;
   $('pickerTitle').textContent=title;$('pickerPath').textContent=pickerTarget||'/';
-  const box=$('pickerTree');box.innerHTML='';box.appendChild(pickerNode('','🏠 根目录'));
+  const box=$('pickerTree');box.innerHTML='';box.appendChild(pickerNode('',''));
   $('pickerOkBtn').textContent=multi?'确定':'选择此目录';
   pickerCount();
   $('pickerModal').classList.add('show');
@@ -2210,12 +2547,12 @@ function renderToken(){
     `<span class="switch-text" id="tokenStateText">${on?'已启用':'未启用'}</span>`+
     `<span class="switch ${on?'on':''}" id="tokenSwitch"><span class="knob"></span></span></div></div>`+
     `<div class="token-row"><span class="token-value">${esc(shown?maskToken(tokenInfo.token):(tokenInfo.has_token?'（服务器端已保存，仅哈希）':'（尚未生成）'))}</span>`+
-    `<button class="icon-btn" onclick="toggleTokenMask()" title="${tokenMask?'显示 Token':'隐藏 Token'}">${tokenMask?'👁':'🙈'}</button>`+
-    `<button class="icon-btn" onclick="copyToken()" title="复制 Token">📋</button>`+
-    `<button class="icon-btn" onclick="tokenAction('refresh')" title="刷新 Token">🔄</button></div>`+
-    `<div class="field-hint">${tokenInfo.broken?'检测到本地密钥已变更，旧 Token 无法解密，请点 🔄 重新生成。'
+    `<button class="icon-btn" onclick="toggleTokenMask()" title="${tokenMask?'显示 Token':'隐藏 Token'}">${ico(tokenMask?'eye':'eye-off')}</button>`+
+    `<button class="icon-btn" onclick="copyToken()" title="复制 Token">${ico('copy')}</button>`+
+    `<button class="icon-btn" onclick="tokenAction('refresh')" title="刷新 Token">${ico('refresh')}</button></div>`+
+    `<div class="field-hint">${tokenInfo.broken?'检测到本地密钥已变更，旧 Token 无法解密，请点刷新按钮重新生成。'
       :(shown?'创建时间：'+esc(tokenInfo.created_str||'—')+'；Token 以对称加密保存在服务器端，重启后仍可查看；刷新后旧 Token 立即失效。'
-      :(tokenInfo.has_token?'Token 已保存但当前不可读，点 🔄 可重新生成。'
+      :(tokenInfo.has_token?'Token 已保存但当前不可读，点刷新按钮可重新生成。'
       :'打开右侧开关即可生成 Token。'))}</div></div>`+
     `<div class="side-section"><label class="field-lbl">用法一：GET（最简单，适合快速验证）</label>`+
     `<div class="code-block">${esc(getCmd)}</div>`+
@@ -2223,8 +2560,8 @@ function renderToken(){
     `<div class="side-section"><label class="field-lbl">用法二：POST JSON（推荐，命令不落在 URL 里）</label>`+
     `<div class="code-block">${esc(postCmd)}</div>`+
     `<div class="field-hint">请求头 <code>X-Token</code> 放 Token，Body 为 JSON；把 <code>cmd</code> 换成你要执行的命令即可。</div></div>`+
-    `<div class="side-section"><button class="btn-ghost" onclick="copyCurl()">📋 复制 POST 示例</button>`+
-    `<button class="btn-ghost" onclick="copyGet()" style="margin-left:8px">📋 复制 GET 示例</button></div>`+
+    `<div class="side-section"><button class="btn-ghost" onclick="copyCurl()">${ico('copy')}复制 POST 示例</button>`+
+    `<button class="btn-ghost" onclick="copyGet()" style="margin-left:8px">${ico('copy')}复制 GET 示例</button></div>`+
     `<div class="side-section"><label class="field-lbl">返回格式</label>`+
     `<div class="code-block">${esc('{"success":true,"exit_code":0,"duration":0.05,"cwd":"D:\\\\dir","output":"..."}')}</div>`+
     `<div class="field-hint">输出最多返回 2 万字符；Token 错误或接口未启用时返回 401。</div></div>`+
@@ -2251,8 +2588,8 @@ async function tokenAction(act){
   try{const r=await fretry('/api/terminal/token',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({action:act})});
     const d=await r.json();
-    if(d.success){tokenMask=true;   // 默认隐藏，需要时点 👁 查看
-      toast(act==='enable'?'接口已启用':act==='disable'?'接口已停用':'Token 已刷新（点 👁 可查看，或直接 📋 复制）','success');
+    if(d.success){tokenMask=true;   // 默认隐藏，需要时点眼睛图标查看
+      toast(act==='enable'?'接口已启用':act==='disable'?'接口已停用':'Token 已刷新（可点眼睛图标查看或复制）','success');
       loadToken()}
     else toast(d.error||'操作失败','error')}catch(e){toast(e.message,'error')}
 }
@@ -2261,7 +2598,7 @@ function scopeRender(){
   const box=$('scopeList');if(!box)return;
   box.innerHTML=formScope.length
     ? formScope.map((p,i)=>`<div class="scope-item"><span class="scope-path" title="${esc(p)}">${esc(p)}</span>`+
-        `<button class="scope-del" onclick="scopeRemove(${i})" title="移除该目录">✕</button></div>`).join('')
+        `<button class="scope-del" onclick="scopeRemove(${i})" title="移除该目录">${ico('close')}</button></div>`).join('')
     : '<div class="scope-empty">还没有添加目录</div>';
 }
 function scopeRemove(i){formScope.splice(i,1);scopeRender()}
@@ -2301,7 +2638,7 @@ function userForm(mode,name){
       `<input class="side-input" type="password" id="nfPass" placeholder="留空 = 不修改密码" autocomplete="new-password"></div>`+
       `<div class="side-section"><label class="field-lbl">目录范围</label>`+
       `<div class="scope-list" id="scopeList"></div>`+
-      `<button class="btn-ghost" onclick="scopeAdd()">＋ 添加目录</button>`+
+      `<button class="btn-ghost" onclick="scopeAdd()">${ico('plus')}添加目录</button>`+
       `<div class="field-hint">可添加多个目录，该用户只能在这些目录内操作；移除全部目录则无法访问任何文件。</div></div>`+
       `<div class="side-actions"><button class="btn-ghost" onclick="closeUserSide()">取消</button>`+
       `<button class="btn-primary" onclick="userSubmitEdit('${esc(name)}')">保存修改</button></div>`;
@@ -2319,7 +2656,7 @@ function userForm(mode,name){
       `<input class="side-input" id="nfPass" placeholder="至少 4 位" autocomplete="new-password"></div>`+
       `<div class="side-section"><label class="field-lbl">目录范围</label>`+
       `<div class="scope-list" id="scopeList"></div>`+
-      `<button class="btn-ghost" onclick="scopeAdd()">＋ 添加目录</button>`+
+      `<button class="btn-ghost" onclick="scopeAdd()">${ico('plus')}添加目录</button>`+
       `<div class="field-hint">可多选。不添加任何目录时，会在超级用户根目录下自动创建同名文件夹。</div></div>`+
       `<div class="side-actions"><button class="btn-ghost" onclick="closeUserSide()">取消</button>`+
       `<button class="btn-primary" onclick="userSubmitAdd()">创建用户</button></div>`;
@@ -2601,6 +2938,10 @@ def api_passwd():
             return jsonify({'success': False, 'error': '需要超级用户权限'})
     elif not _verify(me['name'], old):
         return jsonify({'success': False, 'error': '原密码不正确'})
+    if name == _auth['user']:
+        if not _set_admin_password(new):
+            return jsonify({'success': False, 'error': '保存失败，请检查配置文件和 users.json 的写入权限'})
+        return jsonify({'success': True})
     salt, h = _pw_hash(new)
     rec = _users.get(name) or {}
     _users[name] = {'salt': salt, 'hash': h,
@@ -2805,6 +3146,22 @@ def download(path):
     ap = abspath(path)
     if os.path.isfile(ap): return send_file(ap, as_attachment=True, conditional=True)
     return '文件不存在', 404
+
+
+@app.route('/download_zip/<path:path>')
+def download_zip(path):
+    """文件夹打包下载：边压缩边发送，浏览器会按普通 ZIP 保存。"""
+    ap = abspath(path)
+    if not os.path.isdir(ap): return '目录不存在', 404
+    norm_roots = None
+    if not is_unrestricted():
+        norm_roots = [os.path.normcase(os.path.realpath(r)) for r in user_roots()]
+    filename = _zip_base_name(ap) + '.zip'
+    resp = Response(zip_dir_stream(ap, norm_roots), mimetype='application/zip')
+    resp.headers['Content-Disposition'] = _attachment_header(filename)
+    resp.headers['Cache-Control'] = 'no-store'
+    resp.headers['X-Accel-Buffering'] = 'no'        # 让 nginx 之类的反代不要攒满再发
+    return resp
 
 
 @app.route('/start_server_download', methods=['POST'])
@@ -3362,7 +3719,7 @@ if __name__ == '__main__':
         print(f'HTTPS 证书:  {https_cert}')
     else:
         print(f'HTTP  访问:  http://{HTTP_HOST}:{HTTP_PORT}')
-    print(f'登录账号:  {_auth["user"]} / {_auth["pass"]}')
+    print(_admin_login_line())
     if _IS_DEFAULT_AUTH:
         print('[!] 正在使用默认密码 admin/admin123：能登录的人都能读写文件、执行命令，请尽快修改（改配置文件 auth.admin_pass，或用 SD_PASS 覆盖）')
     if FTP_AVAILABLE and FTP_ENABLED:

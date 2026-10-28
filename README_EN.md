@@ -15,7 +15,7 @@
 
 ### Option 1: download the portable build (Windows, no Python needed)
 
-Grab `RemoteFM-v1.4.2-windows-x64.zip` from the [releases page](https://github.com/willdomybest/yueya/releases/latest),
+Grab `RemoteFM-v1.5.0-windows-x64.zip` from the [releases page](https://github.com/willdomybest/yueya/releases/latest),
 unzip it and double-click `RemoteFM.exe` — **no Python, no dependencies, no installer**, it just runs.
 
 > In China you can also download from [Gitee Releases](https://gitee.com/willdomybest/yueya/releases/latest).
@@ -64,8 +64,8 @@ Open a browser and you are looking at that computer's files. Upload, download, p
 
 | | Capability |
 | --- | --- |
-| 📁 **Files** | Browse, search, sort, multi-select; copy / move / delete / create folders; ZIP compress and extract; switch the root directory anytime |
-| ⬆️ **Transfer** | 32MB chunked uploads with resume; in-browser preview for images / video / text; let the server download from a URL for you |
+| 📁 **Files** | Browse, search, sort, multi-select; copy / move / delete / create folders; ZIP compress and extract; one-click folder download as ZIP; switch the root directory anytime (type a path or browse) |
+| ⬆️ **Transfer** | 32MB chunked uploads with resume and one-click retry from the failure panel; in-browser preview for images / video / text; let the server download from a URL for you |
 | 🌐 **FTP** | Shares the account and root directory with the web UI — paste the link into Explorer and drag files; steadier for very large files |
 | 💻 **Terminal** | Live command output, history, Tab completion, background jobs; the working directory follows the folder you are browsing |
 | ⚙️ **Processes** | CPU and memory usage plus full command lines; kill a stuck process in one click |
@@ -211,13 +211,13 @@ provided "as is" under the MIT license, without warranty of any kind.
 
 ### File management
 
-Browse, search, sort, multi-select; copy / move / delete / create folders; ZIP compress and extract; switch the root directory anytime.
+Browse, search, sort, multi-select; copy / move / delete / create folders; ZIP compress and extract; one-click folder download as ZIP (compressed on the fly, no extra disk use); switch the root directory anytime (type a path or browse).
 
 ![File manager](screenshots/file-manager.png)
 
 ### Upload and transfer
 
-32MB chunked uploads with resume, in-browser preview for images / video / text, and a URL box that lets the server download the file for you.
+32MB chunked uploads with resume; if an upload fails, use the “Retry resume” button in the failure panel to continue from the chunks already uploaded. In-browser preview for images / video / text, and a URL box that lets the server download the file for you.
 
 ![Upload](screenshots/upload.png)
 
@@ -225,6 +225,8 @@ Browse, search, sort, multi-select; copy / move / delete / create folders; ZIP c
 
 Shares the account and root directory with the web UI — paste the link into Explorer or FileZilla
 (Explorer supports FTP natively; SFTP needs a third-party client); made for very large files.
+If Windows or security software has reserved the configured passive ports, the app automatically
+falls back to a kernel-assigned port so PASV can still be established.
 
 ![FTP](screenshots/ftp.png)
 
