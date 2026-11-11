@@ -36,7 +36,7 @@ APP_NAME = 'RemoteFM'
 # 打包进可执行文件的第三方组件（用于读取版本与许可证）
 PKGS = (
     'flask', 'werkzeug', 'jinja2', 'itsdangerous', 'click', 'blinker', 'markupsafe',
-    'requests', 'urllib3', 'certifi', 'charset-normalizer', 'idna', 'pyftpdlib', 'cryptography',
+    'requests', 'urllib3', 'certifi', 'charset-normalizer', 'idna', 'pyftpdlib', 'cryptography', 'psutil',
 )
 LICENSE_HINTS = ('license', 'copying', 'notice', 'authors', 'copyright')
 
@@ -115,7 +115,7 @@ def build_binary():
     icon = os.path.join(BUILD, 'icon.ico')
     write_icon(icon)
     cmd = [sys.executable, '-m', 'PyInstaller', '--noconfirm', '--clean', '--onefile',
-           '--name', APP_NAME, '--icon', icon, 'RemoteFM.py']
+           '--hidden-import', 'remotefm_mcp', '--name', APP_NAME, '--icon', icon, 'RemoteFM.py']
     subprocess.check_call(cmd, cwd=ROOT)
 
 
