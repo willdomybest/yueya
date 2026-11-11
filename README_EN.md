@@ -15,7 +15,7 @@
 
 ### Option 1: download the portable build (Windows, no Python needed)
 
-Grab `RemoteFM-v1.5.0-windows-x64.zip` from the [releases page](https://github.com/willdomybest/yueya/releases/latest),
+Grab `RemoteFM-v1.6.0-windows-x64.zip` from the [releases page](https://github.com/willdomybest/yueya/releases/latest),
 unzip it and double-click `RemoteFM.exe` — **no Python, no dependencies, no installer**, it just runs.
 
 > In China you can also download from [Gitee Releases](https://gitee.com/willdomybest/yueya/releases/latest).
@@ -64,10 +64,10 @@ Open a browser and you are looking at that computer's files. Upload, download, p
 
 | | Capability |
 | --- | --- |
-| 📁 **Files** | Browse, search, sort, multi-select; copy / move / delete / create folders; ZIP compress and extract; one-click folder download as ZIP; switch the root directory anytime (type a path or browse) |
-| ⬆️ **Transfer** | 32MB chunked uploads with resume and one-click retry from the failure panel; in-browser preview for images / video / text; let the server download from a URL for you |
+| 📁 **Files** | Browse, search, sort, multi-select; copy / move / delete / create folders; ZIP compress, ZIP / 7Z extract; multi-select downloads (single file direct, files/folders bundled as ZIP); one-click folder download as ZIP; the root directory switch is bound to the current login session (type a path or browse) |
+| ⬆️ **Transfer** | 8MB chunked uploads with resume and one-click retry from the failure panel; in-browser preview for images / video / text; let the server download from a URL for you |
 | 🌐 **FTP** | Shares the account and root directory with the web UI — paste the link into Explorer and drag files; steadier for very large files |
-| 💻 **Terminal** | Live command output, history, Tab completion, background jobs; the working directory follows the folder you are browsing |
+| 💻 **Terminal** | Multi-tab terminal with live output, history and Tab completion; tabs are kept server-side, so unclosed tabs return on the next login, and closing a tab force-stops its command |
 | ⚙️ **Processes** | CPU and memory usage plus full command lines; kill a stuck process in one click |
 
 ## One line before you start
@@ -82,7 +82,7 @@ The login password equals full control of that machine — **change the default 
 | --- | --- |
 | Python | **3.8 or newer** (tested on 3.12.10) |
 | OS | Windows / macOS / Linux, headless servers included |
-| Dependencies | `Flask`, `requests` and `cryptography` required (the latter generates the self-signed HTTPS certificate); `pyftpdlib` optional (no FTP without it) |
+| Dependencies | `Flask`, `requests` and `cryptography` required (the latter generates the self-signed HTTPS certificate); `pyftpdlib` optional (no FTP without it); 7Z extraction needs the system 7-Zip utility or `py7zr`; optional `psutil` makes the process panel faster |
 | Browser | Any modern browser — Chrome, Edge, Firefox, Safari, or a phone browser |
 | Not needed | No database, no Node.js, no Docker |
 
@@ -137,7 +137,7 @@ The environment variables below are still supported (they win over the config fi
 
 | Role | What it can do |
 | --- | --- |
-| **Superuser** | `admin / admin123` by default (change it with `SD_USER` / `SD_PASS`). Switch the root directory, use the terminal and process manager, and open user management (add / edit / remove normal users, change any password) |
+| **Superuser** | `admin / admin123` by default (change it with `SD_USER` / `SD_PASS`). Switch the root directory (current login session only), use the terminal and process manager, and open user management (add / edit / remove normal users, change any password) |
 | **Normal user** | Created by the superuser with a **multi-directory scope** (for example `D:\tt` + `D:\App` + `E:\Lenovo`). Can only browse, upload, download, compress, rename, copy, move and delete **inside those directories**; moving across scopes is rejected. The terminal, process manager and FTP panel stay hidden, the user-management entry is hidden too, and `../` cannot escape the scope |
 
 User management is a full-screen panel close to the process manager: accounts (name / role / scope / actions) on
@@ -211,13 +211,13 @@ provided "as is" under the MIT license, without warranty of any kind.
 
 ### File management
 
-Browse, search, sort, multi-select; copy / move / delete / create folders; ZIP compress and extract; one-click folder download as ZIP (compressed on the fly, no extra disk use); switch the root directory anytime (type a path or browse).
+Browse, search, sort, multi-select; copy / move / delete / create folders; ZIP compress, ZIP / 7Z extract; one-click folder download as ZIP (compressed on the fly, no extra disk use). Both the toolbar “Download” button (right after Upload) and the context menu support multi-select: one file downloads directly, while one folder or several files/folders are bundled into a single ZIP. The root directory can be switched anytime (type a path or browse), and the choice is bound to the current login session, so separate sessions keep separate current roots.
 
 ![File manager](screenshots/file-manager.png)
 
 ### Upload and transfer
 
-32MB chunked uploads with resume; if an upload fails, use the “Retry resume” button in the failure panel to continue from the chunks already uploaded. In-browser preview for images / video / text, and a URL box that lets the server download the file for you.
+8MB chunked uploads with resume; if an upload fails, use the “Retry resume” button in the failure panel to continue from the chunks already uploaded. In-browser preview for images / video / text, and a URL box that lets the server download the file for you.
 
 ![Upload](screenshots/upload.png)
 
@@ -232,7 +232,7 @@ falls back to a kernel-assigned port so PASV can still be established.
 
 ### Web terminal
 
-Run commands with live output, command history, Tab completion and background jobs; the working directory follows the folder you are browsing.
+Multi-tab web terminal: each tab runs independently and its output is kept server-side. Reload the page or log in again and unclosed tabs come back; the × button force-stops the command in that tab. Command history, Tab completion and a working directory that follows the file browser are included.
 
 ![Terminal](screenshots/terminal.png)
 
@@ -260,6 +260,45 @@ duration) and refreshes every 5 seconds.
 the file only holds `nonce + ciphertext + MAC`. It is decrypted on start, so the token stays visible and keeps
 working after a restart. The key comes from `SD_SECRET` when set (recommended — nothing on disk), otherwise a
 `key.bin` with mode 600 is generated next to the data. User passwords stay one-way hashed and are never displayed.
+
+### MCP (let an AI drive it)
+RemoteFM **serves MCP from the main process**: same process, same port, exposed at `POST /mcp` (MCP Streamable HTTP). It gives MCP clients such as Claude Desktop, Cursor and Codex access to file management, upload/download, terminal, process, user, FTP and token capabilities. **No `--mcp` flag and no extra long-running process** — stopping the web service stops MCP too.
+
+Point an HTTP-capable MCP client at the URL:
+
+```json
+{
+  "mcpServers": {
+    "remotefm": {
+      "type": "http",
+      "url": "http://127.0.0.1:8880/mcp"
+    }
+  }
+}
+```
+
+For stdio-only clients, bridge it with `mcp-remote`:
+
+```json
+{
+  "mcpServers": {
+    "remotefm": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "http://127.0.0.1:8880/mcp"]
+    }
+  }
+}
+```
+
+- **Loopback only by default**: with no token configured, `/mcp` accepts requests from `127.0.0.1` / `::1` only; other hosts get 401.
+- To let an AI client on another machine connect, start RemoteFM with `REMOTEFM_MCP_TOKEN=<random value>` and send `X-MCP-Token: <same value>` or `Authorization: Bearer <same value>` on every request. RemoteFM admin credentials via Basic Auth (`curl -u admin:password`) also work.
+- With HTTPS enabled use `https://IP:port/mcp`; self-signed certificates must be trusted or skipped by the client.
+- `/mcp` accepts `POST` only (`GET` returns 405, `OPTIONS` returns 204 for preflight).
+- `REMOTEFM_MCP_READONLY=1` disables writes, deletes, uploads, terminal and user management while keeping read-only tools.
+- The MCP connection keeps its own RemoteFM login session, so `set_root` affects only that MCP client.
+- Tools cover directory browsing/search, text read/write, create/rename/delete, copy/move, ZIP compression, ZIP/7Z extraction, upload/download, URL-to-remote upload, synchronous/multi-tab terminal execution, process list/kill, users, FTP info and token management.
+- **Fallback**: `python remotefm_mcp.py` and `RemoteFM.exe --mcp` still provide the stdio server (they connect to an already running RemoteFM); use them only when the client has no HTTP transport.
+- **Security:** MCP access is administrator-level control (file read/write and command execution). Use a strong dedicated password and token, and do not expose `/mcp` to the public internet.
 
 ### Processes
 

@@ -39,6 +39,11 @@ try:
 except ImportError:
     FTP_AVAILABLE = False
 
+try:
+    import psutil
+except Exception:
+    psutil = None
+
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(message)s')
 
@@ -326,6 +331,7 @@ KEY_FILE = (os.environ.get('SD_KEY_FILE', '').strip() or str(cfg('files', 'key',
             or os.path.join(os.path.dirname(USERS_FILE), 'key.bin'))
 _users_lock = threading.Lock()
 _users = {}          # name -> {'salt','hash','admin','root'}
+_ROOT_UNSET = object()
 
 
 def _pw_hash(pw, salt=None):
@@ -435,6 +441,14 @@ def _verify(name, pw):
     return name == _auth['user'] and pw == _auth['pass']
 
 
+def _session_root():
+    """超级用户在当前登录会话里选择的根目录；未选择时用配置文件默认值。"""
+    try:
+        return session.get('root_override', _ROOT_UNSET)
+    except RuntimeError:
+        return _ROOT_UNSET
+
+
 def current_user():
     """当前登录用户；后台线程/启动阶段没有会话时按超级用户处理。"""
     try:
@@ -445,8 +459,10 @@ def current_user():
         roots = [_cfg['root']] if _cfg['root'] else []
         return {'name': _auth['user'], 'admin': True, 'root': _cfg['root'], 'roots': roots}
     if name == _auth['user']:
-        roots = [_cfg['root']] if _cfg['root'] else []
-        return {'name': name, 'admin': True, 'root': _cfg['root'], 'roots': roots}
+        override = _session_root()
+        root = _cfg['root'] if override is _ROOT_UNSET else override
+        roots = [root] if root else []
+        return {'name': name, 'admin': True, 'root': root, 'roots': roots}
     rec = _users.get(name)
     if rec:
         roots = norm_roots(rec)
@@ -547,7 +563,7 @@ if _cfg['root']:                       # 根目录留空表示整机模式，无
 
 # ================= 上传参数 =================
 PER_PAGE = 2000
-CHUNK_SIZE = 32*1024*1024
+CHUNK_SIZE = 8*1024*1024
 app.config['MAX_CONTENT_LENGTH'] = CHUNK_SIZE + 8*1024*1024
 
 IMG_E = {'jpg','jpeg','png','gif','webp','svg','bmp','ico','avif'}
@@ -561,11 +577,11 @@ PLAT = {'os':'windows' if IS_WIN else 'unix', 'name':'Windows' if IS_WIN else ('
 ENC = 'gbk' if IS_WIN else 'utf-8'
 
 WIN_CMDS = {'dir','cd','chdir','md','mkdir','rd','rmdir','del','erase','copy','xcopy','robocopy','move','ren','rename','type','more','tree','attrib','fc','comp','find','findstr','sort','cls','ver','vol','date','time','whoami','hostname','systeminfo','tasklist','taskkill','set','path','echo','title','color','ping','ipconfig','netstat','nslookup','tracert','arp','net','netsh','chkdsk','diskpart','format','python','python3','py','pip','node','npm','yarn','git','java','javac','go','cargo','rustc','gcc','g++','cmake','make','curl','wget','ssh','scp','ftp','telnet','powershell','pwsh','cmd','wmic','reg','where','which','exit','help','7z','zip','unzip','tar','gzip'}
-UNIX_CMDS = {'ls','cd','pwd','mkdir','rmdir','rm','cp','mv','ln','cat','head','tail','less','more','touch','file','stat','find','locate','which','whereis','tree','du','df','chmod','chown','chgrp','umask','wc','sort','uniq','cut','paste','tr','sed','awk','grep','egrep','diff','cmp','tar','gzip','gunzip','zip','unzip','bzip2','xz','clear','echo','env','export','unset','set','printenv','date','cal','uptime','uname','hostname','whoami','who','id','ps','top','htop','kill','killall','pkill','jobs','bg','fg','free','vmstat','iostat','lsof','strace','dmesg','sudo','su','exit','logout','history','alias','unalias','ping','ifconfig','ip','netstat','ss','nslookup','dig','host','traceroute','tracert','curl','wget','ssh','scp','rsync','ftp','sftp','nc','telnet','nmap','python','python3','pip','pip3','node','npm','yarn','pnpm','git','java','javac','go','cargo','rustc','gcc','g++','make','cmake','ninja','docker','kubectl','systemctl','service','crontab','at','nohup','screen','tmux','vi','vim','nano','emacs','man','info','help'}
+UNIX_CMDS = {'ls','cd','pwd','mkdir','rmdir','rm','cp','mv','ln','cat','head','tail','less','more','touch','file','stat','find','locate','which','whereis','tree','du','df','chmod','chown','chgrp','umask','wc','sort','uniq','cut','paste','tr','sed','awk','grep','egrep','diff','cmp','tar','gzip','gunzip','zip','unzip','7z','7za','7zr','bzip2','xz','clear','echo','env','export','unset','set','printenv','date','cal','uptime','uname','hostname','whoami','who','id','ps','top','htop','kill','killall','pkill','jobs','bg','fg','free','vmstat','iostat','lsof','strace','dmesg','sudo','su','exit','logout','history','alias','unalias','ping','ifconfig','ip','netstat','ss','nslookup','dig','host','traceroute','tracert','curl','wget','ssh','scp','rsync','ftp','sftp','nc','telnet','nmap','python','python3','pip','pip3','node','npm','yarn','pnpm','git','java','javac','go','cargo','rustc','gcc','g++','make','cmake','ninja','docker','kubectl','systemctl','service','crontab','at','nohup','screen','tmux','vi','vim','nano','emacs','man','info','help'}
 CMDS = WIN_CMDS if IS_WIN else UNIX_CMDS
 
 WIN_COMP = {'dir':['/a','/b','/s','/w','/p'],'cd':['..','\\','/d'],'del':['/f','/q','/s'],'copy':['/y','/v'],'xcopy':['/s','/e','/y','/i'],'robocopy':['/e','/mir','/mov','/move'],'tasklist':['/v','/svc','/fi','/fo'],'taskkill':['/f','/im','/pid','/t'],'ping':['-t','-n','-l'],'ipconfig':['/all','/release','/renew','/flushdns'],'netstat':['-a','-n','-o','-b','-ano'],'git':['status','log','diff','add','commit','push','pull','branch','checkout','merge','clone','init','remote','reset','stash','tag','fetch','rebase'],'python':['-m','-c','-u','-V'],'pip':['install','uninstall','list','show','freeze','upgrade'],'npm':['install','run','start','build','test','init'],'node':['-v','-e'],'curl':['-O','-L','-o','-X','-H','-d','-s','-k'],'wget':['-O','-c','-r'],'tar':['-xzf','-czf','-tzf'],'java':['-jar','-version','-cp'],'go':['run','build','test','mod','get'],'cargo':['build','run','test','check','new','init','add'],'powershell':['-Command','-File','-ExecutionPolicy']}
-UNIX_COMP = {'ls':['-la','-lh','-l','-a','-R','-h'],'cd':['..','~','-'],'rm':['-rf','-r','-f','-i'],'cp':['-r','-a','-v','-u'],'mv':['-v','-u','-f'],'mkdir':['-p'],'chmod':['+x','755','644','777','-R'],'grep':['-r','-i','-n','-l','-v','-E'],'find':['-name','-type','-size','-mtime','-exec'],'sed':['-i','-e','-n'],'tar':['-xzf','-czf','-tzf','-xf'],'gzip':['-k','-d','-9'],'du':['-sh','-h','-a'],'df':['-h','-T'],'ps':['aux','-ef','-eo'],'kill':['-9','-15','-TERM'],'curl':['-O','-L','-o','-X','-H','-d','-s','-k'],'wget':['-O','-c','-r'],'git':['status','log','diff','add','commit','push','pull','branch','checkout','merge','clone','init','remote','reset','stash','tag','fetch','rebase'],'python':['-m','-c','-u','-V'],'python3':['-m','-c','-u','-V'],'pip':['install','uninstall','list','show','freeze','upgrade'],'docker':['ps','images','run','exec','build','logs','stop','start','rm','pull','push'],'systemctl':['start','stop','restart','status','enable','disable'],'kubectl':['get','describe','apply','delete','logs','exec'],'ssh':['-p','-i','-L','-R'],'scp':['-r','-P'],'rsync':['-avz','-av','--delete','--progress'],'ip':['addr','link','route'],'netstat':['-tuln','-an'],'ss':['-tuln','-an','-p']}
+UNIX_COMP = {'ls':['-la','-lh','-l','-a','-R','-h'],'cd':['..','~','-'],'rm':['-rf','-r','-f','-i'],'cp':['-r','-a','-v','-u'],'mv':['-v','-u','-f'],'mkdir':['-p'],'chmod':['+x','755','644','777','-R'],'grep':['-r','-i','-n','-l','-v','-E'],'find':['-name','-type','-size','-mtime','-exec'],'sed':['-i','-e','-n'],'tar':['-xzf','-czf','-tzf','-xf'],'gzip':['-k','-d','-9'],'du':['-sh','-h','-a'],'df':['-h','-T'],'ps':['aux','-ef','-eo'],'kill':['-9','-15','-TERM'],'curl':['-O','-L','-o','-X','-H','-d','-s','-k'],'wget':['-O','-c','-r'],'git':['status','log','diff','add','commit','push','pull','branch','checkout','merge','clone','init','remote','reset','stash','tag','fetch','rebase'],'python':['-m','-c','-u','-V'],'python3':['-m','-c','-u','-V'],'pip':['install','uninstall','list','show','freeze','upgrade'],'docker':['ps','images','run','exec','build','logs','stop','start','rm','pull','push'],'systemctl':['start','stop','restart','status','enable','disable'],'kubectl':['get','describe','apply','delete','logs','exec'],'ssh':['-p','-i','-L','-R'],'scp':['-r','-P'],'rsync':['-avz','-av','--delete','--progress'],'ip':['addr','link','route'],'netstat':['-tuln','-an'],'ss':['-tuln','-an','-p'],'7z':['a','x','l','t']}
 COMP = WIN_COMP if IS_WIN else UNIX_COMP
 
 cmd_hist = []
@@ -573,6 +589,11 @@ HIST_MAX = 500
 act_procs = {}
 out_qs = {}
 bg_tasks = {}
+term_sessions = {}
+term_cancelled = set()
+term_lock = threading.RLock()
+term_session_seq = 0
+TERM_MAX_CHARS = 500_000
 _proc_cache = {'data': None, 'ts': 0}
 
 
@@ -582,7 +603,7 @@ def _check_auth(u, p):
 
 
 def _need_login():
-    if request.path in ('/login', '/favicon.ico', '/favicon.svg', '/api/terminal/exec_token'):
+    if request.path in ('/login', '/favicon.ico', '/favicon.svg', '/api/terminal/exec_token', '/mcp', '/mcp/'):
         # exec_token 用 Token 自证身份，不走登录会话
         return False
     if session.get('logged_in'):
@@ -780,13 +801,16 @@ def rel_to_root(p):
 
 def set_root(p):
     try:
+        if not is_admin():
+            return False, '需要超级用户权限'
         p = (p or '').strip()
-        if not p:
-            _cfg['root'] = ''
-            return True, ''
-        p = os.path.abspath(p)
-        if not os.path.isdir(p): return False, '目录不存在'
-        _cfg['root'] = p
+        if p:
+            p = os.path.abspath(p)
+            if not os.path.isdir(p): return False, '目录不存在'
+        try:
+            session['root_override'] = p      # 仅影响当前登录会话，不改变其他用户/新会话
+        except RuntimeError:
+            _cfg['root'] = p                  # 启动阶段/后台线程没有会话时退回全局默认
         return True, p
     except Exception as e: return False, str(e)
 
@@ -795,15 +819,27 @@ def fnow(t): return time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(t))
 
 
 def merge_chunks(uid, name, total, target):
+    """把已完成分片合并到目标文件；成功前不删除分片，失败后可继续续传。"""
+    tmp = f'{target}.remotefm-{uuid.uuid4().hex[:8]}.part'
     try:
-        with open(target, 'wb') as tf:
+        with open(tmp, 'wb') as tf:
             for i in range(total):
                 cp = os.path.join(CHUNK_DIR, f'{uid}_{i}')
-                if not os.path.exists(cp): return False, f'分片 {i+1} 缺失'
-                with open(cp, 'rb') as cf: shutil.copyfileobj(cf, tf, length=16*1024*1024)
-                os.remove(cp)
-        return True, '上传成功'
-    except Exception as e: return False, f'合并失败: {e}'
+                if not os.path.exists(cp):
+                    raise FileNotFoundError(f'分片 {i+1} 缺失')
+                with open(cp, 'rb') as cf:
+                    shutil.copyfileobj(cf, tf, length=4*1024*1024)
+        os.replace(tmp, target)                 # 完整写好后再替换目标，避免半成品
+    except Exception as e:
+        try:
+            if os.path.exists(tmp): os.remove(tmp)
+        except OSError:
+            pass
+        return False, f'合并失败: {e}'
+    for i in range(total):                      # 合并成功后再清理分片
+        try: os.remove(os.path.join(CHUNK_DIR, f'{uid}_{i}'))
+        except OSError: pass
+    return True, '上传成功'
 
 
 def compress_files(paths, out):
@@ -834,6 +870,16 @@ def _zip_base_name(ap):
     return os.path.basename(ap.rstrip('\\/')) or 'root'
 
 
+def _safe_local_name(name, fallback='file'):
+    """保留中文/空格，去掉路径和 Windows 非法字符，避免 secure_filename 把中文变成空名。"""
+    s = str(name or '').replace('\\', '/').rsplit('/', 1)[-1].strip()
+    s = re.sub(r'[<>:"/\\|?*\x00-\x1f\x7f]', '_', s)
+    s = s.rstrip(' .')
+    if not s or s in ('.', '..'):
+        return fallback
+    return s
+
+
 def _attachment_header(filename):
     """兼容中文文件名的 Content-Disposition（ASCII 回退 + RFC 5987）。"""
     fallback = filename if filename.isascii() else 'download.zip'
@@ -843,15 +889,32 @@ def _attachment_header(filename):
     return f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quote(filename, safe='')}"
 
 
-def zip_dir_stream(ap, norm_roots):
-    """边压缩边输出目录内容，不落临时文件、不把整个 ZIP 读进内存。
+def _unique_zip_names(paths):
+    """给多选下载分配互不冲突的 ZIP 顶层名称，例如 a.txt / a(2).txt。"""
+    used, out = set(), []
+    for ap in paths:
+        base = _zip_base_name(ap)
+        cand = base
+        if cand.lower() in used:
+            stem, ext = os.path.splitext(base)
+            i = 2
+            while f'{stem}({i}){ext}'.lower() in used:
+                i += 1
+            cand = f'{stem}({i}){ext}'
+        used.add(cand.lower())
+        out.append((ap, cand))
+    return out
 
+
+def zip_paths_stream(entries, norm_roots):
+    """把多个文件/目录边压缩边输出，不落临时文件。
+
+    entries: [(绝对路径, ZIP 内顶层名称)]
     norm_roots 为 None 表示整机模式；否则是预先算好的真实路径白名单，
     避免后台线程里访问 Flask 请求上下文。
     """
     q = queue.Queue(maxsize=8)
     stop = threading.Event()
-    base = _zip_base_name(ap)
 
     class _QueueSink:
         def write(self, data):
@@ -875,18 +938,25 @@ def zip_dir_stream(ap, norm_roots):
     def produce():
         try:
             with zipfile.ZipFile(_QueueSink(), 'w', zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
-                for r, dirs, files in os.walk(ap):
-                    dirs[:] = [d for d in dirs if allowed(os.path.join(r, d))]
-                    rel = os.path.relpath(r, ap)
-                    arc_dir = base if rel == '.' else base + '/' + rel.replace(os.sep, '/')
-                    try: zf.write(r, arc_dir)          # 保留空目录
-                    except OSError: pass
-                    for f in files:
-                        fp = os.path.join(r, f)
-                        if not allowed(fp): continue
-                        try: zf.write(fp, arc_dir + '/' + f)
+                for ap, base in entries:
+                    if not allowed(ap): continue
+                    if os.path.isdir(ap):
+                        for r, dirs, files in os.walk(ap):
+                            dirs[:] = [d for d in dirs if allowed(os.path.join(r, d))]
+                            rel = os.path.relpath(r, ap)
+                            arc_dir = base if rel == '.' else base + '/' + rel.replace(os.sep, '/')
+                            try: zf.write(r, arc_dir)          # 保留空目录
+                            except OSError: pass
+                            for f in files:
+                                fp = os.path.join(r, f)
+                                if not allowed(fp): continue
+                                try: zf.write(fp, arc_dir + '/' + f)
+                                except OSError as e:
+                                    logging.warning('打包跳过 %s: %s', fp, e)
+                    elif os.path.isfile(ap):
+                        try: zf.write(ap, base)
                         except OSError as e:
-                            logging.warning('打包跳过 %s: %s', fp, e)
+                            logging.warning('打包跳过 %s: %s', ap, e)
         except Exception:
             if not stop.is_set(): logging.exception('流式打包失败')
         finally:
@@ -907,16 +977,90 @@ def zip_dir_stream(ap, norm_roots):
         stop.set()                                  # 客户端断开后让后台线程尽快退出
 
 
-def extract_zip(zp, td):
+def zip_dir_stream(ap, norm_roots):
+    """单个目录流式打包（保留原文件夹名作为 ZIP 顶层目录）。"""
+    return zip_paths_stream([(ap, _zip_base_name(ap))], norm_roots)
+
+
+def _safe_archive_member(name):
+    """拒绝绝对路径、盘符和 .. 穿越；ZIP/7z 共用。"""
+    n = str(name or '').replace('\\', '/')
+    if not n or n.startswith('/') or re.match(r'^[A-Za-z]:', n):
+        return False
+    return '..' not in [p for p in n.split('/') if p not in ('', '.')]
+
+
+def _find_7z():
+    for name in ('7z', '7za', '7zr'):
+        p = shutil.which(name)
+        if p:
+            return p
+    for env in ('ProgramFiles', 'ProgramFiles(x86)', 'ProgramW6432'):
+        base = os.environ.get(env)
+        if base:
+            p = os.path.join(base, '7-Zip', '7z.exe')
+            if os.path.isfile(p):
+                return p
+    return None
+
+
+def _extract_7z(az, at):
+    try:
+        import py7zr
+    except Exception:
+        py7zr = None
+    if py7zr is not None:
+        try:
+            with py7zr.SevenZipFile(az, 'r') as zf:
+                if not all(_safe_archive_member(n) for n in zf.getnames()):
+                    return False, '压缩包包含不安全的路径'
+                zf.extractall(path=at)
+            return True, '解压成功'
+        except Exception as e:
+            return False, f'7z 解压失败: {e}'
+
+    exe = _find_7z()
+    if not exe:
+        return False, '缺少 7-Zip：请安装 7-Zip 或 pip install py7zr'
+    kw = dict(capture_output=True, text=True, encoding=ENC, errors='replace')
+    if IS_WIN:
+        kw['creationflags'] = subprocess.CREATE_NO_WINDOW
+    try:
+        listing = subprocess.run([exe, 'l', '-slt', '-ba', az], timeout=120, **kw)
+        if listing.returncode != 0:
+            return False, (listing.stderr or listing.stdout or '无法读取 7z 压缩包').strip()[-2000:]
+        for line in (listing.stdout or '').splitlines():
+            if line.startswith('Path = '):
+                name = line[7:].strip()
+                if name and not _safe_archive_member(name):
+                    return False, '压缩包包含不安全的路径'
+        os.makedirs(at, exist_ok=True)
+        r = subprocess.run([exe, 'x', '-y', f'-o{at}', az], timeout=3600, **kw)
+        if r.returncode == 0:
+            return True, '解压成功'
+        return False, (r.stderr or r.stdout or '7z 解压失败').strip()[-2000:]
+    except subprocess.TimeoutExpired:
+        return False, '7z 解压超时'
+    except Exception as e:
+        return False, f'7z 解压失败: {e}'
+
+
+def extract_archive(zp, td):
     try:
         az, at = abspath(zp), abspath(td)
-        if not os.path.exists(az): return False, 'ZIP不存在'
-        if not zipfile.is_zipfile(az): return False, '不是有效ZIP'
+        if not os.path.exists(az): return False, '压缩包不存在'
+        ext = os.path.splitext(az)[1].lower()
+        if ext == '.7z':
+            return _extract_7z(az, at)
+        if ext != '.zip' or not zipfile.is_zipfile(az): return False, '不是有效 ZIP / 7Z'
         os.makedirs(at, exist_ok=True)
         with zipfile.ZipFile(az, 'r') as zf:
             for m in zf.infolist():
+                if not _safe_archive_member(m.filename):
+                    continue
                 mp = os.path.join(at, m.filename)
-                if not mp.startswith(at): continue
+                if not _inside(mp, at):
+                    continue
                 zf.extract(m, at)
         return True, '解压成功'
     except Exception as e: return False, f'解压失败: {e}'
@@ -933,7 +1077,7 @@ def dl_to_server(url, tid):
     try:
         dl_tasks[tid] = {'status':'downloading','progress':0,'message':'开始下载...','file_path':''}
         fname = get_fname(url)
-        fp = os.path.join(DL_DIR, secure_filename(fname))
+        fp = os.path.join(DL_DIR, _safe_local_name(fname, f'dl_{int(time.time())}.tmp'))
         base, ext = os.path.splitext(fp)
         i = 1
         while os.path.exists(fp): fp = f'{base}_{i}{ext}'; i += 1
@@ -1238,6 +1382,35 @@ def start_ftp_server():
         print(f'[FTP] 启动失败: {e}')
 
 
+def _procs_psutil():
+    """有 psutil 时用原生接口取进程，避免每次刷新都启动 PowerShell。"""
+    if psutil is None:
+        return None, 'psutil unavailable'
+    try:
+        cores = psutil.cpu_count(logical=True) or 1
+        mem = psutil.virtual_memory()
+        procs = []
+        for p in psutil.process_iter(['pid', 'name', 'cpu_percent', 'memory_info', 'cmdline']):
+            try:
+                info = p.info
+                if info.get('pid') is None: continue
+                cmd = info.get('cmdline') or []
+                procs.append({
+                    'pid': int(info['pid']),
+                    'name': info.get('name') or '',
+                    'cpu': round((info.get('cpu_percent') or 0) / cores, 1),
+                    'memory': int(info['memory_info'].rss) if info.get('memory_info') else 0,
+                    'command': ' '.join(cmd) if isinstance(cmd, (list, tuple)) else str(cmd),
+                })
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                continue
+        return {'processes': procs, 'system': {
+            'totalMemory': int(mem.total), 'freeMemory': int(mem.available),
+            'cpuCount': cores, 'hostname': socket.gethostname()}}, None
+    except Exception as e:
+        return None, str(e)
+
+
 def _procs_win():
     ps = ('[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;$ErrorActionPreference="SilentlyContinue";'
           '$cores=(Get-CimInstance Win32_ComputerSystem).NumberOfLogicalProcessors;if(-not $cores){$cores=1};'
@@ -1297,7 +1470,9 @@ def get_procs(force=False):
     now = time.time()
     if not force and _proc_cache['data'] and now - _proc_cache['ts'] < 1.0:
         return _proc_cache['data'], None
-    d, err = _procs_win() if IS_WIN else _procs_unix()
+    d, err = _procs_psutil()
+    if d is None:
+        d, err = _procs_win() if IS_WIN else _procs_unix()
     if d is not None:
         _proc_cache['data'] = d
         _proc_cache['ts'] = now
@@ -1339,6 +1514,8 @@ body{font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;font-size
 .btn.primary .ico{color:#fff}
 .btn.active .ico{color:#4a6cf7}
 .btn:hover{background:#f5f7fb;border-color:#c8cede}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+.btn:disabled:hover{background:#fff;border-color:#dfe3eb}
 .btn.primary{background:#4a6cf7;border-color:#4a6cf7;color:#fff}
 .btn.primary:hover{background:#3a5ce0}
 .btn.active{background:#e8ecfb;border-color:#4a6cf7;color:#4a6cf7}
@@ -1604,7 +1781,22 @@ table.file-table .row-actions button.danger:hover{background:#fee;color:#e74c3c;
 .term-btn:hover{background:#3a3a4e;color:#ccc}
 .toggle-icon{color:#aeb9d6;transition:transform .2s;margin-left:4px;display:flex;align-items:center}
 .toggle-icon .ico{width:14px;height:14px}
-.terminal-body{flex:1;min-height:0;display:flex;overflow:hidden}
+.terminal-body{flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden}
+.terminal-body-inner{flex:1;min-height:0;display:flex;overflow:hidden}
+.terminal-tabs-bar{height:34px;display:flex;align-items:flex-end;gap:2px;padding:0 8px;background:#222232;border-bottom:1px solid #333;overflow-x:auto;flex-shrink:0}
+.terminal-tabs{display:flex;align-items:flex-end;gap:2px;min-width:0}
+.terminal-tabs-bar::-webkit-scrollbar{height:0}
+.terminal-tab{display:flex;align-items:center;gap:6px;padding:5px 8px;border-radius:6px 6px 0 0;color:#8f9bb3;cursor:pointer;font-size:12px;max-width:190px;min-width:70px;white-space:nowrap;user-select:none}
+.terminal-tab:hover{background:#2e2e42;color:#ccc}
+.terminal-tab.active{background:#1e1e2e;color:#fff;box-shadow:inset 0 2px 0 #4a6cf7}
+.terminal-tab .tab-name{overflow:hidden;text-overflow:ellipsis}
+.terminal-tab .tab-run{width:6px;height:6px;border-radius:50%;background:#4af7a0;flex-shrink:0;animation:termPulse 1.2s infinite}
+.terminal-tab .tab-close{width:16px;height:16px;border:0;background:transparent;color:#6a6a8a;cursor:pointer;display:flex;align-items:center;justify-content:center;border-radius:3px;padding:0;flex-shrink:0}
+.terminal-tab .tab-close:hover{background:#4a4a63;color:#fff}
+.terminal-tab .tab-close .ico{width:11px;height:11px}
+.term-tab-add{width:24px;height:24px;margin:0 0 4px 2px;border:0;background:transparent;color:#8f9bb3;cursor:pointer;border-radius:4px;font-size:18px;line-height:1;flex-shrink:0}
+.term-tab-add:hover{background:#3a3a4e;color:#fff}
+@keyframes termPulse{0%,100%{opacity:1}50%{opacity:.25}}
 .terminal-history{width:200px;background:#222232;border-right:1px solid #333;display:flex;flex-direction:column;flex-shrink:0}
 .history-header{padding:8px 12px;font-size:11px;color:#6a6a8a;text-transform:uppercase;letter-spacing:.5px;border-bottom:1px solid #2a2a3a;display:flex;justify-content:space-between;align-items:center}
 .history-clear{color:#6a6a8a;cursor:pointer;font-size:12px}
@@ -1753,6 +1945,7 @@ table.process-table tbody tr:hover .process-actions{opacity:1}
 <div class="breadcrumb" id="breadcrumb"></div><div class="sep"></div>
 <div class="search-box"><svg class="ico search-ico" aria-hidden="true"><use href="#i-search"></use></svg><input id="searchInput" placeholder="搜索文件…" onkeydown="if(event.key==='Enter')doSearch()"></div>
 <button class="btn primary" onclick="onUploadClick()"><svg class="ico" aria-hidden="true"><use href="#i-upload"></use></svg>上传</button>
+<button class="btn" id="btnDownloadSel" onclick="downloadSelected()" title="下载选中项；多个项目会打包成 ZIP" disabled><svg class="ico" aria-hidden="true"><use href="#i-download"></use></svg>下载</button>
 <button class="btn" onclick="showMkdir()"><svg class="ico" aria-hidden="true"><use href="#i-folder-plus"></use></svg>新建文件夹</button>
 <button class="btn" onclick="showRemoteDownload()"><svg class="ico" aria-hidden="true"><use href="#i-cloud-download"></use></svg>远程下载</button>
 <button class="btn" id="btnTerminal" onclick="toggleTerminal()"><svg class="ico" aria-hidden="true"><use href="#i-terminal"></use></svg>终端</button>
@@ -1782,11 +1975,13 @@ table.process-table tbody tr:hover .process-actions{opacity:1}
 <div class="terminal-header" onclick="toggleTerminal(event)"><span class="terminal-title"><svg class="ico" aria-hidden="true"><use href="#i-terminal"></use></svg><span>远程命令</span><span class="terminal-platform" id="terminalPlatform">—</span><span class="terminal-cwd" id="terminalCwdDisplay">—</span></span>
 <div class="terminal-header-actions" onclick="event.stopPropagation()"><button class="term-btn" onclick="openTokenPanel()" title="远程命令接口（Token）"><svg class="ico" aria-hidden="true"><use href="#i-key"></use></svg></button><button class="term-btn" onclick="clearTerminal()" title="清空终端"><svg class="ico" aria-hidden="true"><use href="#i-trash"></use></svg></button><button class="term-btn" onclick="killTerminalProcess()" id="btnKillProc" style="display:none" title="终止当前命令"><svg class="ico" aria-hidden="true"><use href="#i-stop"></use></svg></button><span class="toggle-icon"><svg class="ico" aria-hidden="true"><use href="#i-chevron-up"></use></svg></span></div></div>
 <div class="terminal-body">
+<div class="terminal-tabs-bar"><div class="terminal-tabs" id="terminalTabs"></div><button class="term-tab-add" onclick="newTermSession()" title="新建终端">＋</button></div>
+<div class="terminal-body-inner">
 <div class="terminal-history"><div class="history-header"><span>历史记录</span><span class="history-clear" onclick="clearHistory()">清空</span></div><div class="history-list" id="historyList"></div></div>
 <div class="terminal-main"><div class="terminal-output" id="terminalOutput"></div>
 <div class="completion-popup" id="completionPopup"><div class="completion-list" id="completionList"></div></div>
 <div class="terminal-input-row"><span class="prompt" id="terminalPrompt">$</span><input id="terminalInput" class="terminal-input" placeholder="输入命令，按 Tab 补全..." autocomplete="off" spellcheck="false"><button class="term-send-btn" id="termSendBtn">发送</button></div>
-</div></div></div>
+</div></div></div></div>
 
 </div><!-- /.app -->
 
@@ -1817,7 +2012,7 @@ table.process-table tbody tr:hover .process-actions{opacity:1}
 </div>
 <div class="modal-bg" id="rootModal"><div class="modal">
 <h3>更改根目录</h3>
-<div class="form-row"><label>目录绝对路径（留空 = 整台计算机）</label><div class="root-input-row"><input type="text" id="rootInput" placeholder="留空即列出所有盘符；例如 D:/" onkeydown="if(event.key==='Enter')doSetRoot()"><button type="button" onclick="pickRootDir()">浏览…</button></div><div class="hint">直接输入任意绝对路径，或点“浏览…”选择目录；切换后所有操作限制在该目录内</div></div>
+<div class="form-row"><label>目录绝对路径（留空 = 整台计算机）</label><div class="root-input-row"><input type="text" id="rootInput" placeholder="留空即列出所有盘符；例如 D:/" onkeydown="if(event.key==='Enter')doSetRoot()"><button type="button" onclick="pickRootDir()">浏览…</button></div><div class="hint">直接输入任意绝对路径，或点“浏览…”选择目录；只影响当前登录会话，切换后所有操作限制在该目录内</div></div>
 <div class="actions"><button onclick="closeModal('rootModal')">取消</button><button class="primary" onclick="doSetRoot()">确定切换</button></div>
 </div></div>
 <div class="modal-bg" id="mkdirModal"><div class="modal"><h3>新建文件夹</h3><div class="form-row"><label>文件夹名称</label><input type="text" id="mkdirName" onkeydown="if(event.key==='Enter')doMkdir()"></div><div class="actions"><button onclick="closeModal('mkdirModal')">取消</button><button class="primary" onclick="doMkdir()">创建</button></div></div></div>
@@ -1867,7 +2062,7 @@ table.process-table tbody tr:hover .process-actions{opacity:1}
       <div class="mode-card default" onclick="chooseUploadMode('http')">
         <div class="mode-icon"><svg class="ico" aria-hidden="true"><use href="#i-upload"></use></svg></div>
         <div class="mode-title">HTTP 分片上传</div>
-        <div class="mode-desc">浏览器直传，支持断点续传<br>32MB 分片，6 并发</div>
+        <div class="mode-desc">浏览器直传，支持断点续传<br>8MB 分片，4 并发</div>
         <div class="mode-badge">默认</div>
       </div>
       <div class="mode-card" onclick="chooseUploadMode('ftp')">
@@ -1922,14 +2117,15 @@ table.process-table tbody tr:hover .process-actions{opacity:1}
 
 <input type="file" id="fileInput" multiple style="display:none">
 <script>
-const CHUNK_SIZE={{chunk_size}},CONCURRENCY=6,MAX_RETRY=4;
+const CHUNK_SIZE={{chunk_size}},CONCURRENCY=4,MAX_RETRY=4;
 const IMG_E=new Set(['jpg','jpeg','png','gif','webp','svg','bmp','ico','avif']);
 const VID_E=new Set(['mp4','webm','ogg','ogv','mov','m4v','mkv','avi']);
 const TXT_E=new Set(['txt','md','json','js','ts','jsx','tsx','py','html','htm','css','xml','csv','log','ini','conf','yaml','yml','sh','bat','cmd','ps1','java','c','cpp','h','hpp','go','rs','rb','php','sql','vue','svelte','toml','env','gitignore','dockerfile','makefile','srt','ass','vtt']);
 let currentPath='',currentItems=[],selected=new Set(),lastIdx=-1,histStack=[''],histIdx=0,sortBy='name',order='asc',keyword='',currentRoot='',plat={os:'unix',name:'Linux',shell:'/bin/sh'};
-let previewPath='',upFile=null,upUid='',upAbort=false,upBytes=0,speedHist=[],activeChunks=new Map();
-let termCwd='',termHist=[],termHistIdx=-1,curJobId=null,evtSrc=null,compActive=false,compItems=[],compIdx=-1;
-let procData=[],procSys={},procSortKey='cpu',procSortOrder='desc',procTimer=null,procKw='';
+let previewPath='',upFile=null,upUid='',upAbort=false,upBytes=0,upShownBytes=0,upShownPct=0,speedHist=[],activeChunks=new Map();
+let termCwd='',termHist=[],termHistIdx=-1,curJobId=null,compActive=false,compItems=[],compIdx=-1;
+let termSessions=[],activeTermSid='',termStream=null,termOutBuf='',termFlushTimer=null,termHelpShown=new Set();
+let procData=[],procSys={},procSortKey='cpu',procSortOrder='desc',procTimer=null,procKw='',procBusy=false;
 let ftpInfo={enabled:false,host:'',port:2121,user:'',pass:'',passive_ports:''};
 let bgTaskTimer=null,bgTaskId=null,upCloseTimer=null,uploadQueue=[],uploadQueueIdx=0,uploadTargetPath='',uploadRetry=null;
 const $=id=>document.getElementById(id);
@@ -2021,13 +2217,13 @@ if(push){histStack=histStack.slice(0,histIdx+1);if(histStack[histStack.length-1]
  render();updCrumb();updNav();updStatus();updTermCwd();treeReveal()}catch(e){toast('加载失败: '+e.message,'error')}}
 function render(){const tb=$('fileList'),emp=$('emptyState');if(!currentItems.length){tb.innerHTML='';emp.style.display='block';return}emp.style.display='none';
 let h='';currentItems.forEach((it,idx)=>{const sel=selected.has(it.path)?'selected':'';const prev=isPrev(it);
-h+=`<tr class="${sel}" data-idx="${idx}" data-path="${esc(it.path)}"><td class="name-cell"><span class="file-icon">${fileIcon(it)}</span><span>${esc(it.name)}</span></td><td>${esc(it.mtime_str)}</td><td>${esc(it.size_str)}</td><td><div class="row-actions">${prev?`<button onclick="event.stopPropagation();openPreview(currentItems[${idx}])">查看</button>`:''}${`<button onclick="event.stopPropagation();downloadItem(currentItems[${idx}])"${it.is_dir?' title="打包为 ZIP 下载"':''}>下载</button>`}${it.ext==='zip'?`<button onclick="event.stopPropagation();extractOne('${esc(it.path)}')">解压</button>`:''}<button onclick="event.stopPropagation();showRename(currentItems[${idx}])">重命名</button><button class="danger" onclick="event.stopPropagation();deleteOne('${esc(it.path)}','${esc(it.name)}')">删除</button></div></td></tr>`});
+h+=`<tr class="${sel}" data-idx="${idx}" data-path="${esc(it.path)}"><td class="name-cell"><span class="file-icon">${fileIcon(it)}</span><span>${esc(it.name)}</span></td><td>${esc(it.mtime_str)}</td><td>${esc(it.size_str)}</td><td><div class="row-actions">${prev?`<button onclick="event.stopPropagation();openPreview(currentItems[${idx}])">查看</button>`:''}${`<button onclick="event.stopPropagation();downloadItem(currentItems[${idx}])"${it.is_dir?' title="打包为 ZIP 下载"':''}>下载</button>`}${(it.ext==='zip'||it.ext==='7z')?`<button onclick="event.stopPropagation();extractOne('${esc(it.path)}')">解压</button>`:''}<button onclick="event.stopPropagation();showRename(currentItems[${idx}])">重命名</button><button class="danger" onclick="event.stopPropagation();deleteOne('${esc(it.path)}','${esc(it.name)}')">删除</button></div></td></tr>`});
 tb.innerHTML=h;tb.querySelectorAll('tr').forEach(tr=>{tr.addEventListener('click',onRowClick);tr.addEventListener('dblclick',onRowDblClick);tr.addEventListener('contextmenu',onRowCtx)});
 $('sortName').innerHTML=sortBy==='name'?ico(order==='asc'?'chevron-up':'chevron-down'):'';$('sortMtime').innerHTML=sortBy==='mtime'?ico(order==='asc'?'chevron-up':'chevron-down'):'';$('sortSize').innerHTML=sortBy==='size'?ico(order==='asc'?'chevron-up':'chevron-down'):''}
 function updCrumb(){const bc=$('breadcrumb');let h=`<span class="crumb ${currentPath===''?'current':''}" onclick="navigate('')">${ico('home')}根目录</span>`;const parts=currentPath.split('/').filter(Boolean);let acc='';
 parts.forEach((p,i)=>{acc+=(acc?'/':'')+p;const last=i===parts.length-1;h+=`<span class="sep">›</span>`;h+=last?`<span class="crumb current">${esc(p)}</span>`:`<span class="crumb" onclick="navigate('${esc(acc)}')">${esc(p)}</span>`});bc.innerHTML=h;bc.scrollLeft=bc.scrollWidth}
 function updNav(){$('btnBack').disabled=histIdx<=0;$('btnForward').disabled=histIdx>=histStack.length-1;$('btnUp').disabled=currentPath===''}
-function updStatus(){$('statusText').textContent=`共 ${currentItems.length} 项`;$('selectionText').textContent=selected.size?`已选中 ${selected.size} 项`:''}
+function updStatus(){$('statusText').textContent=`共 ${currentItems.length} 项`;$('selectionText').textContent=selected.size?`已选中 ${selected.size} 项`:'';const b=$('btnDownloadSel');if(b)b.disabled=!selected.size}
 function navigate(p){load(p)}
 function goBack(){if(histIdx>0){histIdx--;load(histStack[histIdx],false)}}
 function goForward(){if(histIdx<histStack.length-1){histIdx++;load(histStack[histIdx],false)}}
@@ -2043,8 +2239,8 @@ render();updStatus()}
 function onRowDblClick(e){const it=currentItems[+e.currentTarget.dataset.idx];if(it.is_dir)navigate(it.path);else if(isPrev(it))openPreview(it);else downloadFile(it.path)}
 function onRowCtx(e){e.preventDefault();const p=e.currentTarget.dataset.path;if(!selected.has(p)){selected.clear();selected.add(p);render();updStatus()}showCtxMenu(e.clientX,e.clientY,Array.from(selected))}
 function showCtxMenu(x,y,paths){const m=$('ctxMenu');const items=paths.map(p=>currentItems.find(i=>i.path===p)).filter(Boolean);
-const allZip=items.length>0&&items.every(i=>!i.is_dir&&i.ext==='zip');const single=items.length===1;
-let h='';if(single){const it=items[0];if(it.is_dir)h+=`<div class="item" onclick="ctxOpen()"><span class="icon">${ico('folder-open')}</span>打开</div><div class="item" onclick="ctxDownload()"><span class="icon">${ico('download')}</span>打包下载</div>`;else{if(isPrev(it))h+=`<div class="item" onclick="ctxPreview()"><span class="icon">${ico('eye')}</span>查看</div>`;h+=`<div class="item" onclick="ctxDownload()"><span class="icon">${ico('download')}</span>下载</div>`}h+=`<div class="divider"></div>`}
+const allZip=items.length>0&&items.every(i=>!i.is_dir&&(i.ext==='zip'||i.ext==='7z'));const single=items.length===1;
+let h='';if(single){const it=items[0];if(it.is_dir)h+=`<div class="item" onclick="ctxOpen()"><span class="icon">${ico('folder-open')}</span>打开</div><div class="item" onclick="ctxDownload()"><span class="icon">${ico('download')}</span>打包下载</div>`;else{if(isPrev(it))h+=`<div class="item" onclick="ctxPreview()"><span class="icon">${ico('eye')}</span>查看</div>`;h+=`<div class="item" onclick="ctxDownload()"><span class="icon">${ico('download')}</span>下载</div>`}h+=`<div class="divider"></div>`}else{h+=`<div class="item" onclick="ctxDownload()"><span class="icon">${ico('download')}</span>下载</div><div class="divider"></div>`}
 h+=`<div class="item" onclick="ctxCompress()"><span class="icon">${ico('archive')}</span>压缩为 ZIP</div>`;
 if(allZip)h+=`<div class="item" onclick="ctxExtract()"><span class="icon">${ico('package')}</span>解压</div>`;
 h+=`<div class="divider"></div><div class="item" onclick="ctxCopyMove('copy')"><span class="icon">${ico('copy')}</span>复制到…</div><div class="item" onclick="ctxCopyMove('move')"><span class="icon">${ico('move')}</span>移动到…</div>`+
@@ -2060,7 +2256,7 @@ document.addEventListener('scroll',()=>$('ctxMenu').classList.remove('show'),tru
 $('fileArea').addEventListener('contextmenu',e=>{if(e.target.closest('tr'))return;e.preventDefault();selected.clear();render();updStatus();showCtxMenuEmpty(e.clientX,e.clientY)});
 function ctxOpen(){const it=currentItems.find(i=>i.path===Array.from(selected)[0]);if(it&&it.is_dir)navigate(it.path)}
 function ctxPreview(){const it=currentItems.find(i=>i.path===Array.from(selected)[0]);if(it&&isPrev(it))openPreview(it)}
-function ctxDownload(){Array.from(selected).forEach(p=>{const it=currentItems.find(i=>i.path===p);if(it)downloadItem(it)})}
+function ctxDownload(){downloadSelected()}
 function ctxDelete(){deleteMany(Array.from(selected))}
 async function ctxCompress(){$('compressName').value='archive.zip';$('compressModal').classList.add('show');$('compressName').focus();$('compressName').select();window._cp=Array.from(selected)}
 async function ctxExtract(){const ps=Array.from(selected);try{const r=await fretry('/api/extract',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({paths:ps,target:currentPath})});const d=await r.json();if(d.success){toast(`已解压 ${d.results.filter(x=>x.success).length}/${ps.length}`,'success');refresh()}else toast(d.error||'失败','error')}catch(e){toast(e.message,'error')}}
@@ -2132,6 +2328,15 @@ async function deleteOne(p,n){if(!confirm(`确定删除「${n}」？`))return;de
 async function deleteMany(ps){try{const r=await fretry('/api/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({paths:ps})});const d=await r.json();if(d.success){if(d.deleted.length)toast(`已删除 ${d.deleted.length} 项`,'success');if(d.errors?.length)toast(d.errors[0],'error');refresh()}else toast(d.error||'失败','error')}catch(e){toast(e.message,'error')}}
 function downloadFile(p){window.location.href='/download/'+encodeURIComponent(p)}
 function downloadItem(it){if(!it)return;if(it.is_dir)window.location.href='/download_zip/'+it.path.split('/').map(encodeURIComponent).join('/');else downloadFile(it.path)}
+function downloadSelected(){
+ const ps=Array.from(selected);
+ if(!ps.length){toast('请先选择文件或文件夹','error');return}
+ if(ps.length===1){const it=currentItems.find(i=>i.path===ps[0]);if(it)downloadItem(it);else toast('选中项已不存在','error');return}
+ const f=document.createElement('form');
+ f.method='POST';f.action='/download_zip_multi';f.style.display='none';
+ const i=document.createElement('input');i.type='hidden';i.name='paths';i.value=JSON.stringify(ps);
+ f.appendChild(i);document.body.appendChild(f);f.submit();setTimeout(()=>f.remove(),0)}
+
 function showMkdir(){$('mkdirName').value='';$('mkdirModal').classList.add('show');$('mkdirName').focus()}
 async function doMkdir(){const n=$('mkdirName').value.trim();if(!n){toast('请输入名称','error');return}
 try{const r=await fretry('/api/mkdir',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:currentPath,name:n})});const d=await r.json();if(d.success){toast('成功','success');closeModal('mkdirModal');refresh()}else toast(d.error||'失败','error')}catch(e){toast(e.message,'error')}}
@@ -2145,7 +2350,7 @@ const fileArea=$('fileArea');
 ['dragleave','drop'].forEach(ev=>fileArea.addEventListener(ev,e=>{e.preventDefault();fileArea.classList.remove('dragover')}));
 fileArea.addEventListener('drop',e=>{if(e.dataTransfer.files.length)handleUpload(e.dataTransfer.files)});
 $('fileInput').addEventListener('change',e=>{if(e.target.files.length){handleUpload(e.target.files);e.target.value=''}});
-function showUpPanel(fn){if(upCloseTimer){clearTimeout(upCloseTimer);upCloseTimer=null}uploadRetry=null;const p=$('uploadPanel');p.classList.remove('collapsed','done');p.classList.add('show');$('uploadTitleIcon').innerHTML=ico('upload');$('uploadTitleText').textContent='上传进度';$('uploadFileName').textContent=fn?`— ${fn}`:'';$('btnCancelUpload').style.display='';$('btnRetryUpload').style.display='none';$('uploadProgressWrap').classList.remove('bg-task')}
+function showUpPanel(fn){if(upCloseTimer){clearTimeout(upCloseTimer);upCloseTimer=null}uploadRetry=null;upShownBytes=0;upShownPct=0;const p=$('uploadPanel');p.classList.remove('collapsed','done');p.classList.add('show');$('uploadTitleIcon').innerHTML=ico('upload');$('uploadTitleText').textContent='上传进度';$('uploadFileName').textContent=fn?`— ${fn}`:'';$('btnCancelUpload').style.display='';$('btnRetryUpload').style.display='none';$('uploadProgressWrap').classList.remove('bg-task')}
 function toggleUploadPanel(e){if(e&&e.target.closest('.close-btn'))return;$('uploadPanel').classList.toggle('collapsed')}
 function closeUploadPanel(e){if(e)e.stopPropagation();if(upCloseTimer){clearTimeout(upCloseTimer);upCloseTimer=null}$('uploadPanel').classList.remove('show')}
 function markUpDone(){$('uploadPanel').classList.add('done');$('uploadTitleIcon').innerHTML=ico('check');$('uploadTitleText').textContent='上传成功';$('btnCancelUpload').style.display='none';$('btnRetryUpload').style.display='none'}
@@ -2158,14 +2363,14 @@ upFile=f;upUid=resumeUid||genUid();const target=targetPath!==undefined?targetPat
 upAbort=false;upBytes=0;speedHist=[];activeChunks.clear();showUpPanel(f.name);
 $('uploadProgressFill').style.width='0%';$('uploadedSize').textContent='0B';$('totalSize').textContent=fmtSize(f.size);$('uploadSpeed').textContent='0 KB/s';$('remainingTime').textContent='--';$('currentChunk').textContent='0';$('totalChunks').textContent=Math.ceil(f.size/CHUNK_SIZE);
 const total=Math.ceil(f.size/CHUNK_SIZE);let up=[];try{const r=await fretry(`/check_chunks?file_uid=${upUid}`);const d=await r.json();up=d.uploaded_chunks||[]}catch(e){}
-upBytes=up.length*CHUNK_SIZE;if(upBytes>f.size)upBytes=f.size;updProg();
+upBytes=up.reduce((n,i)=>n+Math.min(CHUNK_SIZE,Math.max(0,f.size-i*CHUNK_SIZE)),0);updProg();if(resumeUid&&upBytes>0)toast(`已跳过 ${fmtSize(upBytes)}，从断点继续`,'success');
 const pend=[];for(let i=0;i<total;i++)if(!up.includes(i))pend.push(i);
 let fin=0,cur=0,failed=null;
 async function worker(){while(true){if(upAbort)throw new Error('已取消');if(failed)throw failed;const idx=cur++;if(idx>=pend.length)return;const i=pend[idx];const s=i*CHUNK_SIZE,e=Math.min(s+CHUNK_SIZE,f.size);const blob=f.slice(s,e);
-try{const res=await upChunkRetry(i,blob,target);if(!res.success)throw new Error(`分片 ${i+1} 失败: ${res.message}`);fin++;upBytes+=blob.size;updProg()}catch(err){failed=err;throw err}}}
+try{const res=await upChunkRetry(i,blob,target);if(!res.success)throw new Error(`分片 ${i+1} 失败: ${res.message}`);fin++}catch(err){failed=err;throw err}}}
 try{const ws=[];for(let k=0;k<CONCURRENCY;k++)ws.push(worker());await Promise.all(ws);
 const mr=await fretry('/merge_chunks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({file_uid:upUid,file_name:f.name,total_chunks:total,current_path:target})});const md=await mr.json();
-if(md.success){$('uploadProgressFill').style.width='100%';$('uploadProgressFill').textContent='100%';$('uploadedSize').textContent=fmtSize(f.size);$('remainingTime').textContent='0秒';$('currentChunk').textContent=total;$('totalChunks').textContent=total;markUpDone();$('uploadFileName').textContent=`— ${f.name} 成功`;toast(`「${f.name}」成功`,'success');refresh();upCloseTimer=setTimeout(()=>{closeUploadPanel();upCloseTimer=null},1500);return true}
+if(md.success){upShownBytes=f.size;upShownPct=100;$('uploadProgressFill').style.width='100%';$('uploadProgressFill').textContent='100%';$('uploadedSize').textContent=fmtSize(f.size);$('remainingTime').textContent='0秒';$('currentChunk').textContent=total;$('totalChunks').textContent=total;markUpDone();$('uploadFileName').textContent=`— ${f.name} 成功`;toast(`「${f.name}」成功`,'success');refresh();upCloseTimer=setTimeout(()=>{closeUploadPanel();upCloseTimer=null},1500);return true}
 throw new Error(md.message)}
 catch(e){const msg=(e&&e.message)?e.message:String(e);
 if(upAbort||msg.includes('已取消')){markUploadCancelled();return false}
@@ -2179,12 +2384,13 @@ const fd=new FormData();fd.append('file_uid',upUid);fd.append('chunk_index',idx)
 $('currentChunk').textContent=idx+1;const xhr=new XMLHttpRequest();let ll=0,lt=Date.now();xhr.timeout=600000;
 xhr.upload.onprogress=e=>{if(!e.lengthComputable)return;activeChunks.set(idx,e.loaded);const now=Date.now(),dt=(now-lt)/1000;
 if(dt>=0.3){const sp=(e.loaded-ll)/dt/1024;speedHist.push(sp);if(speedHist.length>10)speedHist.shift();updProg();ll=e.loaded;lt=now}};
-xhr.onload=()=>{activeChunks.delete(idx);if(xhr.status===200){try{res(JSON.parse(xhr.responseText))}catch(e){res({success:false,message:'解析失败'})}}else res({success:false,message:`HTTP ${xhr.status}`})};
+xhr.onload=()=>{if(xhr.status===200){let d;try{d=JSON.parse(xhr.responseText)}catch(e){activeChunks.delete(idx);res({success:false,message:'解析失败'});return}activeChunks.delete(idx);if(d.success){upBytes+=blob.size;updProg()}res(d)}else{activeChunks.delete(idx);res({success:false,message:`HTTP ${xhr.status}`})}};
 xhr.onerror=()=>{activeChunks.delete(idx);res({success:false,message:'网络错误'})};
 xhr.onabort=()=>{activeChunks.delete(idx);res({success:false,message:'已取消'})};
 xhr.ontimeout=()=>{activeChunks.delete(idx);res({success:false,message:'超时'})};
 xhr.open('POST','/upload_chunk');xhr.send(fd)})}
-function updProg(){let at=0;activeChunks.forEach(v=>at+=v);const c=Math.min(upBytes+at,upFile.size);const pct=upFile.size?c/upFile.size*100:0;
+function updProg(){let at=0;activeChunks.forEach(v=>at+=v);let c=Math.min(upBytes+at,upFile.size);if(c<upShownBytes)c=upShownBytes;else upShownBytes=c;
+let pct=upFile.size?c/upFile.size*100:0;if(pct<upShownPct)pct=upShownPct;else upShownPct=pct;
 $('uploadProgressFill').style.width=pct+'%';$('uploadProgressFill').textContent=pct.toFixed(1)+'%';$('uploadedSize').textContent=fmtSize(c);
 if(speedHist.length){const avg=speedHist.reduce((a,b)=>a+b,0)/speedHist.length;$('uploadSpeed').textContent=avg.toFixed(0)+' KB/s';$('remainingTime').textContent=fmtTime((upFile.size-c)/(avg*1024))}}
 function cancelUpload(){upAbort=true;uploadQueue=[];uploadQueueIdx=0;uploadTargetPath='';markUploadCancelled()}
@@ -2207,24 +2413,82 @@ function toggleTerminal(e){
     if(open)setTimeout(()=>$('terminalInput').focus(),260);
 }
 function updTermCwd(){termCwd=currentPath;const sep=plat.os==='windows'?'\\':'/';const base=rootDisplay().replace(/\//g,sep);const p=termCwd?(currentRoot?(base.replace(/[\\/]+$/,'')+sep+termCwd.replace(/\//g,sep)):termCwd.replace(/\//g,sep)):base;$('terminalCwdDisplay').textContent=p}
-function clearTerminal(){$('terminalOutput').innerHTML=''}
-function tApp(text,cls=''){const o=$('terminalOutput');const d=document.createElement('div');d.className=cls;d.textContent=text;o.appendChild(d);o.scrollTop=o.scrollHeight}
-function tAppRaw(t){const o=$('terminalOutput');o.appendChild(document.createTextNode(t));o.scrollTop=o.scrollHeight}
+function flushTermOut(){if(termFlushTimer){clearTimeout(termFlushTimer);termFlushTimer=null}if(!termOutBuf)return;const o=$('terminalOutput');o.appendChild(document.createTextNode(termOutBuf));termOutBuf='';o.scrollTop=o.scrollHeight;while(o.textContent.length>400000&&o.firstChild)o.removeChild(o.firstChild)}
+function queueTermOut(t){if(!t)return;termOutBuf+=t;if(!termFlushTimer)termFlushTimer=setTimeout(flushTermOut,50)}
+function tApp(text,cls=''){flushTermOut();const o=$('terminalOutput');const d=document.createElement('div');d.className=cls;d.textContent=text;o.appendChild(d);o.scrollTop=o.scrollHeight}
+function tAppRaw(t){queueTermOut(t)}
 function hint(label,cmd){return `<b style="color:#b8b8d0">${label}</b> <span class="hint-cmd" onclick="useHintCmd(this)" data-cmd="${esc(cmd)}">${esc(cmd)}</span>`}
 function useHintCmd(el){const c=el.getAttribute('data-cmd');$('terminalInput').value=c;$('terminalInput').focus();hideComp()}
-async function sendTermCmd(){if(curJobId){toast('有命令执行中','error');return}
-const inp=$('terminalInput'),cmd=inp.value.trim();if(!cmd)return;
-const cc=plat.os==='windows'?['cls','clear']:['clear','cls'];if(cc.includes(cmd.toLowerCase())){clearTerminal();inp.value='';return}
-inp.value='';hideComp();tApp(`${plat.os==='windows'?'>':'$'} ${cmd}`,'cmd-line');saveHist(cmd);
-try{const r=await fretry('/api/terminal/exec',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({command:cmd,cwd:termCwd})});const d=await r.json();
-if(!d.success){tApp(d.error||'失败','error-line');return}
-curJobId=d.job_id;$('btnKillProc').style.display='flex';$('termSendBtn').disabled=true;startOutStream(d.job_id)}catch(e){tApp('失败: '+e.message,'error-line')}}
-function startOutStream(jid){if(evtSrc)evtSrc.close();evtSrc=new EventSource(`/api/terminal/stream/${jid}`);
-evtSrc.addEventListener('message',e=>{try{const d=JSON.parse(e.data);if(d.type==='output')tAppRaw(d.content);else if(d.type==='error')tApp(d.content,'error-line');else if(d.type==='exit')tApp(d.content,'exit-line')}catch(e){}});
-evtSrc.addEventListener('done',()=>{evtSrc.close();evtSrc=null;curJobId=null;$('btnKillProc').style.display='none';$('termSendBtn').disabled=false;$('terminalInput').focus()});
-evtSrc.addEventListener('heartbeat',()=>{});evtSrc.onerror=()=>{if(evtSrc){evtSrc.close();evtSrc=null}curJobId=null;$('btnKillProc').style.display='none';$('termSendBtn').disabled=false}}
+function updTermInput(){const run=!!curJobId;$('termSendBtn').disabled=run;$('btnKillProc').style.display=run?'flex':'none'}
+function renderTermTabs(){const box=$('terminalTabs');if(!box)return;box.innerHTML=termSessions.length?termSessions.map(s=>`<div class="terminal-tab ${s.id===activeTermSid?'active':''}" onclick="selectTermSession('${s.id}')" title="${esc(s.title)}">${s.running?'<span class="tab-run"></span>':''}<span class="tab-name">${esc(s.title)}</span><button class="tab-close" onclick="event.stopPropagation();closeTermSession('${s.id}')" title="关闭终端">${ico('close')}</button></div>`).join(''):'<span style="color:#6a6a8a;font-size:11px;padding:6px 4px">没有打开的终端</span>'}
+function closeTermStream(){if(termStream){termStream.close();termStream=null}}
+function openTermStream(sid){
+ closeTermStream();
+ const es=new EventSource(`/api/terminal/session/${encodeURIComponent(sid)}/stream`);
+ termStream=es;
+ es.onopen=()=>{if(termStream===es){$('terminalOutput').innerHTML='';termOutBuf='';termHelpShown.delete(sid);if(termFlushTimer){clearTimeout(termFlushTimer);termFlushTimer=null}}};
+ es.addEventListener('message',e=>{if(termStream!==es)return;try{const d=JSON.parse(e.data);
+  if(d.type==='output')queueTermOut(d.content);
+  else if(d.type==='cmd')tApp(d.content,'cmd-line');
+  else if(d.type==='error')tApp(d.content,'error-line');
+  else if(d.type==='exit')tApp(d.content,'exit-line');
+ }catch(err){}});
+ es.addEventListener('state',e=>{if(termStream!==es)return;try{const d=JSON.parse(e.data);
+  const s=termSessions.find(x=>x.id===sid);if(s){s.running=!!d.running;s.job_id=d.job_id||'';s.output_count=d.output_count||0}
+  if(sid===activeTermSid){curJobId=d.running?(d.job_id||null):null;updTermInput();renderTermTabs();if(!d.running&&d.output_count===0)showTermHelpOnce(sid)}
+ }catch(err){}});
+ es.addEventListener('done',e=>{if(termStream!==es)return;try{const d=JSON.parse(e.data);const s=termSessions.find(x=>x.id===sid);if(s){s.running=false;s.job_id=''};if(sid===activeTermSid){if(!d.job_id||curJobId===d.job_id)curJobId=null;updTermInput();renderTermTabs();$('terminalInput').focus()}}catch(err){}});
+ es.addEventListener('heartbeat',()=>{});
+ es.onerror=()=>{};                                  // 由 EventSource 自动重连；服务端会重放当前标签历史
+}
+async function selectTermSession(sid){
+ const s=termSessions.find(x=>x.id===sid);if(!s)return;
+ activeTermSid=sid;try{localStorage.setItem('termActiveSid',sid)}catch(e){};curJobId=s.running?(s.job_id||null):null;
+ closeTermStream();termOutBuf='';if(termFlushTimer){clearTimeout(termFlushTimer);termFlushTimer=null}
+ $('terminalOutput').innerHTML='';updTermInput();renderTermTabs();openTermStream(sid);
+ if(!$('terminalPanel').classList.contains('collapsed'))setTimeout(()=>$('terminalInput').focus(),120);
+}
+async function loadTermSessions(){
+ try{const r=await fretry('/api/terminal/sessions');const d=await r.json();if(!d.success)throw new Error(d.error||'加载失败');
+  termSessions=d.sessions||[];
+  if(!termSessions.length){await newTermSession();return}
+  let sid='';try{sid=localStorage.getItem('termActiveSid')||''}catch(e){};if(!termSessions.some(s=>s.id===sid))sid=termSessions[termSessions.length-1].id;
+  await selectTermSession(sid);
+ }catch(e){toast('终端标签加载失败: '+e.message,'error')}
+}
+async function newTermSession(){
+ try{const r=await fretry('/api/terminal/sessions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cwd:termCwd})});const d=await r.json();
+  if(!d.success){toast(d.error||'创建失败','error');return}
+  termSessions.push(d.session);await selectTermSession(d.session.id)
+ }catch(e){toast(e.message,'error')}
+}
+async function closeTermSession(sid){
+ const s=termSessions.find(x=>x.id===sid);if(!s)return;
+ if(s.running&&!confirm('关闭这个终端标签会强制结束其中正在运行的命令，确定？'))return;
+ try{const r=await fretry(`/api/terminal/sessions/${encodeURIComponent(sid)}`,{method:'DELETE'});const d=await r.json();if(!d.success){toast(d.error||'关闭失败','error');return}
+  termSessions=termSessions.filter(x=>x.id!==sid);termHelpShown.delete(sid);
+  if(activeTermSid===sid){closeTermStream();activeTermSid='';curJobId=null;termOutBuf='';$('terminalOutput').innerHTML='';updTermInput()}
+  if(!termSessions.length){renderTermTabs();tApp('终端已关闭，点上方 + 新建。','info-line');return}
+  if(!activeTermSid)await selectTermSession(termSessions[termSessions.length-1].id);else renderTermTabs()
+ }catch(e){toast(e.message,'error')}
+}
+async function clearTerminal(){
+ flushTermOut();termOutBuf='';$('terminalOutput').innerHTML='';
+ if(activeTermSid){try{await fretry(`/api/terminal/sessions/${encodeURIComponent(activeTermSid)}/clear`,{method:'POST'})}catch(e){}}
+}
+async function sendTermCmd(){
+ if(!activeTermSid){toast('请先新建终端','error');return}
+ if(curJobId){toast('有命令执行中','error');return}
+ const inp=$('terminalInput'),cmd=inp.value.trim();if(!cmd)return;
+ const cc=plat.os==='windows'?['cls','clear']:['clear','cls'];if(cc.includes(cmd.toLowerCase())){await clearTerminal();inp.value='';return}
+ inp.value='';hideComp();saveHist(cmd);
+ try{const r=await fretry('/api/terminal/exec',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({command:cmd,cwd:termCwd,session_id:activeTermSid})});const d=await r.json();
+  if(!d.success){tApp(d.error||'失败','error-line');return}
+  curJobId=d.job_id;updTermInput();const s=termSessions.find(x=>x.id===activeTermSid);if(s){s.running=true;s.job_id=d.job_id;renderTermTabs()}
+ }catch(e){tApp('失败: '+e.message,'error-line')}
+}
 async function killTerminalProcess(){if(!curJobId)return;if(!confirm('确定终止当前命令？'))return;
-try{await fretry(`/api/terminal/kill/${curJobId}`,{method:'POST'});tApp('[已终止]','exit-line')}catch(e){toast(e.message,'error')}}
+ try{await fretry(`/api/terminal/kill/${curJobId}`,{method:'POST'})}catch(e){toast(e.message,'error')}}
 function saveHist(c){termHist=termHist.filter(h=>h!==c);termHist.unshift(c);if(termHist.length>200)termHist.pop();termHistIdx=-1;renderHist()}
 function renderHist(){$('historyList').innerHTML=termHist.slice(0,50).map(c=>`<div class="history-item" onclick="useHistCmd('${esc(c)}')" title="${esc(c)}">${esc(c)}</div>`).join('')}
 function useHistCmd(c){$('terminalInput').value=c;$('terminalInput').focus();hideComp()}
@@ -2258,10 +2522,11 @@ if(e.key==='Escape'){hideComp();return}
 if(compActive&&!['Shift','Control','Alt'].includes(e.key)){setTimeout(()=>{if(compActive&&!inp.value.length)hideComp()},50)}});
 inp.addEventListener('input',()=>{if(compActive){clearTimeout(inp._ct);inp._ct=setTimeout(()=>handleTab(),300)}});
 inp.addEventListener('blur',()=>setTimeout(hideComp,200))}
-async function initTerm(){await loadPlat();setupTermInput();loadHistSrv();updTermCwd();$('termSendBtn').addEventListener('click',sendTermCmd);
-const w=plat.os==='windows';
-tApp(`远程命令面板 [${plat.name}]`,'info-line');
-if(w){
+function showTermHelpOnce(sid){
+ if(!sid||sid!==activeTermSid||termHelpShown.has(sid))return;
+ termHelpShown.add(sid);flushTermOut();tApp(`远程命令面板 [${plat.name}]`,'info-line');
+ const w=plat.os==='windows';
+ if(w){
     const help=document.createElement('div');
     help.innerHTML=`
 <div style="color:#ffd94a;font-weight:600;margin-top:8px">${ico('archive')} 压缩 / 解压</div>
@@ -2291,7 +2556,7 @@ if(w){
 <div class="hint-line">按 PID 强杀：&nbsp;${hint('', 'taskkill /f /pid 12345')}</div>
 <div style="color:#7a8299;margin-top:10px;font-size:11px">${ico('bulb')} 点击绿色命令可自动填入输入框 &nbsp;|&nbsp; Tab 补全 / 上下键历史 / Enter 执行</div>`;
     $('terminalOutput').appendChild(help);
-}else{
+ }else{
     const help=document.createElement('div');
     help.innerHTML=`
 <div style="color:#ffd94a;font-weight:600;margin-top:8px">${ico('archive')} 压缩 / 解压</div>
@@ -2319,23 +2584,30 @@ if(w){
 <div class="hint-line">强杀：&nbsp;${hint('', 'kill -9 12345')}</div>
 <div style="color:#7a8299;margin-top:10px;font-size:11px">${ico('bulb')} 点击绿色命令可自动填入输入框 &nbsp;|&nbsp; Tab 补全 / 上下键历史 / Enter 执行</div>`;
     $('terminalOutput').appendChild(help);
+ }
+ $('terminalOutput').scrollTop=0;
 }
-$('terminalOutput').scrollTop=0;}
+async function initTerm(){await loadPlat();setupTermInput();loadHistSrv();updTermCwd();$('termSendBtn').addEventListener('click',sendTermCmd);renderTermTabs();await loadTermSessions();}
 
 async function openProcessPanel(){$('processPanel').classList.add('show');$('btnProcess').classList.add('active');await refreshProcesses(true);startProcAuto()}
 function closeProcessPanel(){$('processPanel').classList.remove('show');$('btnProcess').classList.remove('active');stopProcAuto()}
-function startProcAuto(){stopProcAuto();if($('processAutoRefresh').checked)procTimer=setInterval(()=>{if($('processPanel').classList.contains('show'))refreshProcesses(false)},3000)}
+function startProcAuto(){stopProcAuto();if($('processAutoRefresh').checked)procTimer=setInterval(()=>{if($('processPanel').classList.contains('show'))refreshProcesses(false)},8000)}
 function stopProcAuto(){if(procTimer){clearInterval(procTimer);procTimer=null}}
 $('processAutoRefresh').addEventListener('change',()=>{if($('processAutoRefresh').checked)startProcAuto();else stopProcAuto()});
-async function refreshProcesses(force){try{const r=await fretry('/api/process/list'+(force?'?force=1':''));const d=await r.json();
-if(!d.success){toast(d.error||'获取失败','error');return}
-procData=d.processes||[];procSys=d.system||{};
-$('statProcCount').textContent=procData.length;
-const totalCpu=procData.reduce((a,b)=>a+(b.cpu||0),0);
-$('statCpu').textContent=totalCpu.toFixed(1)+'%';
-$('statMem').textContent=procSys.totalMemory?`${fmtBytes(procSys.totalMemory-procSys.freeMemory)} / ${fmtBytes(procSys.totalMemory)}`:'-';
-$('statHost').textContent=procSys.hostname||'-';
-renderProcesses();updProcFooter()}catch(e){toast('获取失败: '+e.message,'error')}}
+async function refreshProcesses(force){
+ if(procBusy)return;procBusy=true;
+ try{const r=await fretry('/api/process/list'+(force?'?force=1':''));const d=await r.json();
+  if(!d.success){toast(d.error||'获取失败','error');return}
+  procData=d.processes||[];procSys=d.system||{};
+  $('statProcCount').textContent=procData.length;
+  const totalCpu=procData.reduce((a,b)=>a+(b.cpu||0),0);
+  $('statCpu').textContent=totalCpu.toFixed(1)+'%';
+  $('statMem').textContent=procSys.totalMemory?`${fmtBytes(procSys.totalMemory-procSys.freeMemory)} / ${fmtBytes(procSys.totalMemory)}`:'-';
+  $('statHost').textContent=procSys.hostname||'-';
+  renderProcesses();updProcFooter()
+ }catch(e){toast('获取失败: '+e.message,'error')}
+ finally{procBusy=false}
+}
 function renderProcesses(){const kw=($('processSearch').value||'').trim().toLowerCase();
 let arr=procData.slice();
 if(kw)arr=arr.filter(p=>(p.name||'').toLowerCase().includes(kw)||String(p.pid).includes(kw)||(p.command||'').toLowerCase().includes(kw));
@@ -2720,6 +2992,94 @@ function pickUserRoot(){pickerOpen('为该用户选择根目录',abs=>{if($('nfR
 </script></body></html>'''
 
 
+# ================= 内置 MCP HTTP 端点 =================
+_mcp_http = {'client': None, 'lock': threading.RLock()}
+
+
+def _mcp_local_url():
+    """内置 MCP 回环客户端访问本进程 HTTP 服务的地址（HTTPS 开启时会跟随 307 跳转）。"""
+    host = HTTP_HOST if HTTP_HOST not in ('', '0.0.0.0', '::') else '127.0.0.1'
+    return f'http://{host}:{HTTP_PORT}'
+
+
+def _mcp_http_client():
+    with _mcp_http['lock']:
+        if _mcp_http['client'] is None:
+            import remotefm_mcp
+            c = remotefm_mcp.RFClient()
+            c.url = _mcp_local_url()
+            c.user, c.password = _auth['user'], _auth['pass']
+            c.verify = False
+            c.session.verify = False
+            remotefm_mcp.CLIENT = c
+            _mcp_http['client'] = c
+        return _mcp_http['client']
+
+
+def _mcp_authorized():
+    expected = (os.environ.get('REMOTEFM_MCP_TOKEN') or '').strip()
+    given = (request.headers.get('X-MCP-Token') or '').strip()
+    auth = (request.headers.get('Authorization') or '').strip()
+    if not given and auth.lower().startswith('bearer '):
+        given = auth[7:].strip()
+    if expected:
+        if given and hmac.compare_digest(given, expected):
+            return True
+    elif request.remote_addr in ('127.0.0.1', '::1', '::ffff:127.0.0.1'):
+        return True                      # 未配置 token 时默认只允许本机 MCP 客户端
+    a = request.authorization
+    if a and _check_auth(a.username, a.password):
+        return True
+    try:
+        if session.get('logged_in') and current_user().get('admin'):
+            return True
+    except RuntimeError:
+        pass
+    return False
+
+
+@app.route('/mcp', methods=['GET', 'POST', 'OPTIONS'])
+@app.route('/mcp/', methods=['GET', 'POST', 'OPTIONS'])
+def mcp_http():
+    if request.method == 'OPTIONS':
+        r = Response('', 204)
+        r.headers['Allow'] = 'POST, OPTIONS'
+        r.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, X-MCP-Token, Mcp-Session-Id'
+        r.headers['Access-Control-Allow-Methods'] = 'POST, OPTIONS'
+        return r
+    if request.method == 'GET':
+        return jsonify({'error': 'MCP Streamable HTTP 使用 POST /mcp'}), 405
+    if not _mcp_authorized():
+        return jsonify({'error': 'MCP 未授权：本机连接或设置 REMOTEFM_MCP_TOKEN/X-MCP-Token'}), 401
+    _mcp_http_client()
+    import remotefm_mcp
+    data = request.get_json(silent=True)
+    if data is None:
+        return jsonify({'jsonrpc': '2.0', 'id': None,
+                        'error': {'code': -32700, 'message': 'JSON 解析失败'}}), 400
+    try:
+        with _mcp_http['lock']:
+            if isinstance(data, list):
+                out = []
+                for msg in data:
+                    if not isinstance(msg, dict):
+                        out.append({'jsonrpc': '2.0', 'id': None,
+                                    'error': {'code': -32600, 'message': '无效请求'}})
+                    else:
+                        resp = remotefm_mcp._handle(msg)
+                        if resp is not None: out.append(resp)
+                if not out:
+                    return Response('', 202)
+                return jsonify(out)
+            resp = remotefm_mcp._handle(data)
+            if resp is None:
+                return Response('', 202)
+            return jsonify(resp)
+    except Exception as e:
+        return jsonify({'jsonrpc': '2.0', 'id': data.get('id') if isinstance(data, dict) else None,
+                        'error': {'code': -32603, 'message': str(e)}}), 500
+
+
 # ================= 路由 =================
 @app.errorhandler(RequestEntityTooLarge)
 def _413(e): return jsonify({'success':False,'message':'文件过大'}), 413
@@ -2845,8 +3205,8 @@ def api_users():
     if r: return r
     d = request.get_json(silent=True) or {}
     if request.method == 'GET':
-        out = [{'name': _auth['user'], 'admin': True, 'root': _cfg['root'],
-                'roots': [_cfg['root']] if _cfg['root'] else []}]
+        out = [{'name': _auth['user'], 'admin': True, 'root': get_root(),
+                'roots': user_roots()}]
         for n, rec in sorted(_users.items()):
             if n == _auth['user']: continue
             rr = norm_roots(rec)
@@ -2907,7 +3267,7 @@ def api_users():
         if not os.path.isdir(root):
             return jsonify({'success': False, 'error': '根目录不存在'})
     else:
-        root = os.path.join(_cfg['root'], name)
+        root = os.path.join(get_root() or tempfile.gettempdir(), name)
         try: os.makedirs(root, exist_ok=True)
         except OSError as e: return jsonify({'success': False, 'error': f'根目录创建失败: {e}'})
     salt, h = _pw_hash(pw)
@@ -2915,7 +3275,7 @@ def api_users():
     if rerr:
         return jsonify({'success': False, 'error': rerr})
     if not roots:
-        r0 = os.path.join(_cfg['root'] or tempfile.gettempdir(), name)
+        r0 = os.path.join(get_root() or tempfile.gettempdir(), name)
         try: os.makedirs(r0, exist_ok=True)
         except OSError as e: return jsonify({'success': False, 'error': f'目录创建失败: {e}'})
         roots = [os.path.abspath(r0)]
@@ -3067,7 +3427,7 @@ def api_compress():
     ps, n, cur = d.get('paths',[]), (d.get('name') or '').strip(), d.get('current','')
     if not ps or not n: return jsonify({'success':False,'error':'参数缺失'})
     if not n.endswith('.zip'): n += '.zip'
-    ok, msg = compress_files(ps, os.path.join(abspath(cur), secure_filename(n)))
+    ok, msg = compress_files(ps, os.path.join(abspath(cur), _safe_local_name(n, 'archive.zip')))
     return jsonify({'success':ok,'message':msg})
 
 
@@ -3076,8 +3436,11 @@ def api_extract():
     d = request.get_json() or {}
     ps, t = d.get('paths',[]), d.get('target','')
     if not ps: return jsonify({'success':False,'error':'未选择'})
-    res = [{'path':p, 'success':ok, 'message':msg} for p in ps for ok, msg in [extract_zip(p, t)]]
-    return jsonify({'success':True,'results':res})
+    res = [{'path':p, 'success':ok, 'message':msg} for p in ps for ok, msg in [extract_archive(p, t)]]
+    ok_any = any(r['success'] for r in res)
+    out = {'success': ok_any, 'results': res}
+    if not ok_any: out['error'] = res[0]['message'] if res else '解压失败'
+    return jsonify(out)
 
 
 @app.route('/preview/<path:path>')
@@ -3101,6 +3464,39 @@ def api_read_text():
     except Exception as e: return jsonify({'success':False,'error':str(e)})
 
 
+@app.route('/api/write_text', methods=['POST'])
+def api_write_text():
+    d = request.get_json(silent=True) or {}
+    p, content = (d.get('path') or '').strip(), d.get('content')
+    if not p or content is None:
+        return jsonify({'success': False, 'error': '参数缺失'})
+    try: raw = str(content).encode('utf-8')
+    except Exception: return jsonify({'success': False, 'error': '内容编码失败'})
+    if len(raw) > 8 * 1024 * 1024:
+        return jsonify({'success': False, 'error': '内容超过 8MB'})
+    ap = abspath(p)
+    if not ap or os.path.isdir(ap):
+        return jsonify({'success': False, 'error': '路径不可用'})
+    parent = os.path.dirname(ap)
+    if not os.path.isdir(parent):
+        if not d.get('create_parents'):
+            return jsonify({'success': False, 'error': '父目录不存在'})
+        try: os.makedirs(parent, exist_ok=True)
+        except OSError as e: return jsonify({'success': False, 'error': str(e)})
+    tmp = f'{ap}.remotefm-{uuid.uuid4().hex[:8]}.part'
+    try:
+        with open(tmp, 'wb') as f:
+            f.write(raw)
+            f.flush(); os.fsync(f.fileno())
+        os.replace(tmp, ap)
+        return jsonify({'success': True, 'path': rel_to_root(ap), 'size': len(raw)})
+    except Exception as e:
+        try:
+            if os.path.exists(tmp): os.remove(tmp)
+        except OSError: pass
+        return jsonify({'success': False, 'error': str(e)})
+
+
 @app.route('/upload_chunk', methods=['POST'])
 def upload_chunk():
     try:
@@ -3110,7 +3506,16 @@ def upload_chunk():
         if not uid or not ch:
             return jsonify({'success': False, 'message': '参数缺失'})
         cp = os.path.join(CHUNK_DIR, f'{uid}_{ci}')
-        ch.save(cp)
+        tmp = f'{cp}.part-{uuid.uuid4().hex[:8]}'
+        try:
+            ch.save(tmp)
+            os.replace(tmp, cp)                 # 完整落盘后再标记为已上传，避免半截分片
+        except Exception:
+            try:
+                if os.path.exists(tmp): os.remove(tmp)
+            except OSError:
+                pass
+            raise
         return jsonify({'success': True, 'message': f'分片 {ci} 上传成功'})
     except Exception as e:
         logging.exception('upload_chunk error')
@@ -3136,7 +3541,7 @@ def api_merge():
     uid, name = d.get('file_uid'), d.get('file_name')
     total, cur = int(d.get('total_chunks',0)), d.get('current_path','')
     if not uid or not name: return jsonify({'success':False,'message':'参数缺失'})
-    tp = os.path.join(abspath(cur), secure_filename(name))
+    tp = os.path.join(abspath(cur), _safe_local_name(name, 'upload.bin'))
     ok, msg = merge_chunks(uid, name, total, tp)
     return jsonify({'success':ok,'message':msg})
 
@@ -3161,6 +3566,43 @@ def download_zip(path):
     resp.headers['Content-Disposition'] = _attachment_header(filename)
     resp.headers['Cache-Control'] = 'no-store'
     resp.headers['X-Accel-Buffering'] = 'no'        # 让 nginx 之类的反代不要攒满再发
+    return resp
+
+
+@app.route('/download_zip_multi', methods=['POST'])
+def download_zip_multi():
+    """多选下载：把多个文件/文件夹合并成一个 ZIP 流式发送。"""
+    raw = request.form.get('paths')
+    if raw is None:
+        body = request.get_json(silent=True)
+        raw = body.get('paths') if isinstance(body, dict) else None
+    if isinstance(raw, str):
+        try: paths = json.loads(raw)
+        except ValueError: return '路径参数无效', 400
+    else:
+        paths = raw
+    if not isinstance(paths, list) or not paths:
+        return '请选择文件或文件夹', 400
+
+    aps, seen = [], set()
+    for p in paths:
+        if not isinstance(p, str): continue
+        ap = abspath(p)
+        if not ap or not os.path.exists(ap) or not in_scope(ap): continue
+        key = os.path.normcase(ap)
+        if key in seen: continue
+        seen.add(key); aps.append(ap)
+    if not aps:
+        return '没有可下载的文件', 400
+
+    norm_roots = None
+    if not is_unrestricted():
+        norm_roots = [os.path.normcase(os.path.realpath(r)) for r in user_roots()]
+    filename = (_zip_base_name(aps[0]) + '.zip') if len(aps) == 1 else 'RemoteFM-selection.zip'
+    resp = Response(zip_paths_stream(_unique_zip_names(aps), norm_roots), mimetype='application/zip')
+    resp.headers['Content-Disposition'] = _attachment_header(filename)
+    resp.headers['Cache-Control'] = 'no-store'
+    resp.headers['X-Accel-Buffering'] = 'no'
     return resp
 
 
@@ -3335,12 +3777,180 @@ def api_plat():
     return jsonify({'success':True,'os':PLAT['os'],'name':PLAT['name'],'shell':PLAT['shell'],'encoding':ENC,'commands':sorted(CMDS)})
 
 
+def _term_payload(s):
+    return {'id': s['id'], 'title': s['title'], 'running': bool(s.get('job_id')),
+            'job_id': s.get('job_id') or '', 'cwd': s.get('cwd') or '',
+            'output_count': len(s.get('output') or [])}
+
+
+def _term_append(sid, kind, text):
+    if not sid or not text: return
+    with term_lock:
+        s = term_sessions.get(sid)
+        if not s: return
+        s['output'].append((kind, text))
+        s['chars'] = s.get('chars', 0) + len(text)
+        while s['chars'] > TERM_MAX_CHARS and len(s['output']) > 1:
+            _, old = s['output'].pop(0)
+            s['chars'] -= len(old)
+        for q in list(s['subs']):
+            try: q.put_nowait((kind, text))
+            except queue.Full: pass
+
+
+def _term_state(sid, job=''):
+    if not sid: return
+    with term_lock:
+        s = term_sessions.get(sid)
+        if not s: return
+        payload = {'running': bool(job), 'job_id': job or '', 'output_count': len(s['output'])}
+        subs = list(s['subs'])
+    for q in subs:
+        try: q.put_nowait(('__state__', payload))
+        except queue.Full: pass
+
+
+def _term_done(sid, jid):
+    if not sid: return
+    with term_lock:
+        s = term_sessions.get(sid)
+        if not s: return
+        if s.get('job_id') == jid:
+            s['job_id'] = ''
+        subs = list(s['subs'])
+    for q in subs:
+        try: q.put_nowait(('done', jid))
+        except queue.Full: pass
+
+
+def _new_term_session(cwd=''):
+    global term_session_seq
+    with term_lock:
+        term_session_seq += 1
+        s = {'id': uuid.uuid4().hex[:12], 'title': f'终端 {term_session_seq}',
+             'created': time.time(), 'cwd': cwd or '', 'output': [], 'chars': 0,
+             'job_id': '', 'subs': set()}
+        term_sessions[s['id']] = s
+        return s
+
+
+def _kill_job(jid):
+    proc = act_procs.get(jid)
+    if not proc: return False
+    try:
+        if IS_WIN:
+            r = subprocess.run(['taskkill', '/F', '/T', '/PID', str(proc.pid)],
+                               capture_output=True, timeout=10, creationflags=subprocess.CREATE_NO_WINDOW)
+            if r.returncode != 0:
+                proc.kill()                 # taskkill 失败时至少结束主进程
+        else:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        return True
+    except Exception:
+        try: proc.kill()
+        except Exception: pass
+        return False
+
+
+def _delete_term_session(sid):
+    with term_lock:
+        s = term_sessions.pop(sid, None)
+        if not s: return False
+        job = s.get('job_id')
+        subs = list(s['subs'])
+        s['subs'].clear()
+    if job:
+        with term_lock: term_cancelled.add(job)
+        _kill_job(job)
+    for q in subs:
+        try: q.put_nowait(('__closed__', ''))
+        except queue.Full: pass
+    return True
+
+
+@app.route('/api/terminal/sessions', methods=['GET', 'POST'])
+def api_term_sessions():
+    r = _admin_only()
+    if r: return r
+    if request.method == 'POST':
+        with term_lock:
+            if len(term_sessions) >= 12:
+                return jsonify({'success': False, 'error': '终端标签最多 12 个'})
+        d = request.get_json(silent=True)
+        if not isinstance(d, dict): d = {}
+        s = _new_term_session((d.get('cwd') or '').strip())
+        return jsonify({'success': True, 'session': _term_payload(s)})
+    with term_lock:
+        items = [_term_payload(s) for s in sorted(term_sessions.values(), key=lambda x: x.get('created', 0))]
+    return jsonify({'success': True, 'sessions': items})
+
+
+@app.route('/api/terminal/sessions/<sid>', methods=['DELETE'])
+def api_term_session_delete(sid):
+    r = _admin_only()
+    if r: return r
+    return jsonify({'success': True}) if _delete_term_session(sid) else jsonify({'success': False, 'error': '终端标签不存在'})
+
+
+@app.route('/api/terminal/sessions/<sid>/clear', methods=['POST'])
+def api_term_session_clear(sid):
+    r = _admin_only()
+    if r: return r
+    with term_lock:
+        s = term_sessions.get(sid)
+        if not s: return jsonify({'success': False, 'error': '终端标签不存在'})
+        s['output'].clear(); s['chars'] = 0
+    return jsonify({'success': True})
+
+
+@app.route('/api/terminal/session/<sid>/stream')
+def api_term_session_stream(sid):
+    r = _admin_only()
+    if r: return r
+    with term_lock:
+        s = term_sessions.get(sid)
+        if not s: return jsonify({'error': '终端标签不存在'}), 404
+        q = queue.Queue(maxsize=2000)
+        s['subs'].add(q)
+        hist = list(s['output'])
+        job = s.get('job_id') or ''
+
+    def gen():
+        try:
+            for kind, text in hist:
+                yield f"event: message\ndata: {json.dumps({'type': kind, 'content': text}, ensure_ascii=False)}\n\n"
+            yield f"event: state\ndata: {json.dumps({'running': bool(job), 'job_id': job, 'output_count': len(hist)})}\n\n"
+            while True:
+                try: item = q.get(timeout=20)
+                except queue.Empty:
+                    yield 'event: heartbeat\ndata: \n\n'; continue
+                kind, payload = item
+                if kind == '__closed__': break
+                if kind == 'done':
+                    yield f"event: done\ndata: {json.dumps({'job_id': payload})}\n\n"; continue
+                if kind == '__state__':
+                    yield f"event: state\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"; continue
+                yield f"event: message\ndata: {json.dumps({'type': kind, 'content': payload}, ensure_ascii=False)}\n\n"
+        except GeneratorExit:
+            pass
+        finally:
+            with term_lock:
+                s = term_sessions.get(sid)
+                if s: s['subs'].discard(q)
+
+    return Response(stream_with_context(gen()), mimetype='text/event-stream',
+                    headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no',
+                             'Connection': 'keep-alive'})
+
+
 @app.route('/api/terminal/exec', methods=['POST'])
 def api_term_exec():
     r = _admin_only()
     if r: return r
-    d = request.get_json() or {}
+    d = request.get_json(silent=True)
+    if not isinstance(d, dict): d = {}
     cmd, cwd = (d.get('command') or '').strip(), d.get('cwd','')
+    sid = (d.get('session_id') or '').strip()
     if not cmd: return jsonify({'success':False,'error':'命令为空'})
     try: parts = shlex.split(cmd, posix=(not IS_WIN))
     except ValueError: parts = cmd.split()
@@ -3355,28 +3965,113 @@ def api_term_exec():
     cmd_hist.append({'command':cmd,'cwd':cwd,'time':time.time()})
     if len(cmd_hist) > HIST_MAX: cmd_hist.pop(0)
     jid = str(uuid.uuid4())[:8]
-    t = threading.Thread(target=_run_cmd, args=(jid, cmd, wd), daemon=True); t.start()
-    return jsonify({'success':True,'job_id':jid,'command':cmd,'cwd':wd})
+    if sid:
+        with term_lock:
+            s = term_sessions.get(sid)
+            if not s: return jsonify({'success':False,'error':'终端标签不存在'})
+            if s.get('job_id'):
+                return jsonify({'success':False,'error':'该终端标签有命令执行中'})
+            s['job_id'] = jid
+            s['cwd'] = cwd or ''
+        _term_state(sid, jid)
+    try:
+        threading.Thread(target=_run_cmd, args=(jid, cmd, wd, sid or None), daemon=True).start()
+    except Exception as e:
+        if sid:
+            with term_lock:
+                s = term_sessions.get(sid)
+                if s and s.get('job_id') == jid: s['job_id'] = ''
+            _term_state(sid, '')
+        return jsonify({'success':False,'error':f'启动失败: {e}'})
+    return jsonify({'success':True,'job_id':jid,'command':cmd,'cwd':wd,'session_id':sid})
 
 
-def _run_cmd(jid, cmd, cwd):
+@app.route('/api/terminal/exec_sync', methods=['POST'])
+def api_term_exec_sync():
+    r = _admin_only()
+    if r: return r
+    d = request.get_json(silent=True)
+    if not isinstance(d, dict): d = {}
+    cmd, cwd = (d.get('command') or '').strip(), d.get('cwd', '')
+    if not cmd: return jsonify({'success': False, 'error': '命令为空'})
+    try: parts = shlex.split(cmd, posix=(not IS_WIN))
+    except ValueError: parts = cmd.split()
+    if not parts: return jsonify({'success': False, 'error': '无效命令'})
+    base = parts[0].lower()
+    if IS_WIN: base = base.replace('.exe', '').replace('.bat', '').replace('.cmd', '')
+    if base not in CMDS: return jsonify({'success': False, 'error': f'命令 "{base}" 不在允许列表中'})
+    for pat in [r'rm\s+(-rf?|--recursive)\s+/(\s|$)', r'rm\s+(-rf?|--recursive)\s+/\*', r'mkfs', r'dd\s+if=', r'>\s*/dev/sd', r'format\s+[a-z]:', r'del\s+/[sq]\s+[a-z]:']:
+        if re.search(pat, cmd, re.IGNORECASE): return jsonify({'success': False, 'error': '包含危险操作'})
+    wd = abspath(cwd) if cwd else get_root()
+    if not os.path.isdir(wd): wd = get_root()
+    try:
+        timeout = max(1, min(int(d.get('timeout') or 30), 300))
+    except (TypeError, ValueError):
+        timeout = 30
+    kw = dict(shell=True, cwd=wd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+              stderr=subprocess.STDOUT, encoding=ENC, errors='replace', timeout=timeout)
+    if IS_WIN: kw['creationflags'] = subprocess.CREATE_NO_WINDOW
+    else: kw['preexec_fn'] = os.setsid
+    started = time.time()
+    try:
+        p = subprocess.run(cmd, **kw)
+        out = (p.stdout or '')[-50000:]
+        return jsonify({'success': p.returncode == 0, 'exit_code': p.returncode,
+                        'duration': round(time.time() - started, 2), 'cwd': wd,
+                        'output': out})
+    except subprocess.TimeoutExpired as e:
+        out = (e.stdout or '')[-50000:] if isinstance(e.stdout, str) else ''
+        return jsonify({'success': False, 'exit_code': -1, 'duration': round(time.time() - started, 2),
+                        'cwd': wd, 'output': out, 'error': f'执行超时（{timeout}s）'})
+    except Exception as e:
+        return jsonify({'success': False, 'exit_code': -1, 'cwd': wd, 'output': '', 'error': str(e)})
+
+
+def _run_cmd(jid, cmd, cwd, sid=None):
     q = queue.Queue(); out_qs[jid] = q
-    q.put(('start', f'$ {cmd}\n'))
+    with term_lock: cancelled = jid in term_cancelled
+    if cancelled:
+        q.put(('done', '')); act_procs.pop(jid, None)
+        with term_lock: term_cancelled.discard(jid)
+        _term_done(sid, jid)
+        threading.Thread(target=lambda: (time.sleep(30), out_qs.pop(jid, None)), daemon=True).start()
+        return
+    start_text = f'$ {cmd}\n'
+    q.put(('start', start_text))
+    _term_append(sid, 'cmd', start_text)
+    pending, last_flush = [], time.time()
+    def emit_output():
+        nonlocal pending, last_flush
+        if not pending: return
+        text = ''.join(pending); pending = []; last_flush = time.time()
+        q.put(('output', text)); _term_append(sid, 'output', text)
     try:
         kw = dict(shell=True, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.PIPE, encoding=ENC, errors='replace', bufsize=1)
         if IS_WIN: kw['creationflags'] = subprocess.CREATE_NO_WINDOW
         else: kw['preexec_fn'] = os.setsid
         proc = subprocess.Popen(cmd, **kw)
         act_procs[jid] = proc
+        with term_lock: cancelled = jid in term_cancelled
+        if cancelled: _kill_job(jid)
         for ln in iter(proc.stdout.readline, ''):
             if not ln: break
-            q.put(('output', ln))
+            pending.append(ln)
+            if len(pending) >= 20 or time.time() - last_flush >= 0.08:
+                emit_output()
+        emit_output()
         proc.wait()
-        q.put(('exit', f'\n[退出码: {proc.returncode}]\n'))
+        exit_text = f'\n[退出码: {proc.returncode}]\n'
+        q.put(('exit', exit_text)); _term_append(sid, 'exit', exit_text)
     except Exception as e:
-        q.put(('error', f'出错: {e}\n')); q.put(('exit', '\n[异常结束]\n'))
+        emit_output()
+        err_text = f'出错: {e}\n'; exit_text = '\n[异常结束]\n'
+        q.put(('error', err_text)); q.put(('exit', exit_text))
+        _term_append(sid, 'error', err_text); _term_append(sid, 'exit', exit_text)
     finally:
+        emit_output()
         q.put(('done', '')); act_procs.pop(jid, None)
+        with term_lock: term_cancelled.discard(jid)
+        _term_done(sid, jid)
         def _cl():
             time.sleep(30); out_qs.pop(jid, None)
         threading.Thread(target=_cl, daemon=True).start()
@@ -3403,13 +4098,8 @@ def api_term_stream(jid):
 def api_term_kill(jid):
     r = _admin_only()
     if r: return r
-    proc = act_procs.get(jid)
-    if not proc: return jsonify({'success':False,'error':'进程不存在'})
-    try:
-        if IS_WIN: subprocess.run(['taskkill','/F','/T','/PID',str(proc.pid)], capture_output=True, timeout=10)
-        else: os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-        return jsonify({'success':True,'message':'已终止'})
-    except Exception as e: return jsonify({'success':False,'error':str(e)})
+    if _kill_job(jid): return jsonify({'success':True,'message':'已终止'})
+    return jsonify({'success':False,'error':'进程不存在'})
 
 
 @app.route('/api/terminal/history')
@@ -3698,6 +4388,17 @@ if __name__ == '__main__':
                                   _enc_cfg.get('seed') or ''), ensure_ascii=False))
         sys.exit(0)
 
+    if len(sys.argv) > 1 and sys.argv[1] == '--mcp':
+        # 兼容模式：主进程启动时已内置 POST /mcp，这里只在需要 stdio 传输时使用。
+        print('[MCP] --mcp 为兼容的 stdio 模式；主进程已内置 POST /mcp，无需单独启动', file=sys.stderr)
+        try:
+            from remotefm_mcp import main as _mcp_main
+        except Exception as e:
+            print(f'[!] MCP 模块加载失败: {e}', file=sys.stderr)
+            sys.exit(1)
+        _mcp_main()
+        sys.exit(0)
+
     if FTP_AVAILABLE and FTP_ENABLED:
         threading.Thread(target=start_ftp_server, daemon=True).start()
 
@@ -3730,7 +4431,9 @@ if __name__ == '__main__':
         print('FTP  未启用（配置项 ftp.enabled=false）')
     else:
         print(f'FTP  未启用（安装: pip install pyftpdlib）')
-    print(f'分片: {CHUNK_SIZE//(1024*1024)}MB  并发: 6')
+    print(f'分片: {CHUNK_SIZE//(1024*1024)}MB  并发: 4')
+    _mcp_hint = '仅本机' if not (os.environ.get('REMOTEFM_MCP_TOKEN') or '').strip() else '已启用 Token'
+    print(f'MCP  端点:  {_mcp_local_url()}/mcp（POST Streamable HTTP；{_mcp_hint}）')
     print(f'平台: {PLAT["name"]}  编码: {ENC}  命令: {len(CMDS)} 个')
     print('=' * 60)
     srv = None
