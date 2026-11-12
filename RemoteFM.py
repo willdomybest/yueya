@@ -818,6 +818,20 @@ def set_root(p):
 def fnow(t): return time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(t))
 
 
+def unique_target_path(target):
+    """目标已存在时按「名称-数字.扩展名」另存，避免覆盖同名文件或合并失败。"""
+    if not os.path.exists(target):
+        return target
+    d, fn = os.path.split(target)
+    stem, ext = os.path.splitext(fn)
+    stem = stem or 'file'
+    for i in range(1, 10000):
+        cand = os.path.join(d, f'{stem}-{i}{ext}')
+        if not os.path.exists(cand):
+            return cand
+    return os.path.join(d, f'{stem}-{uuid.uuid4().hex[:8]}{ext}')
+
+
 def merge_chunks(uid, name, total, target):
     """把已完成分片合并到目标文件；成功前不删除分片，失败后可继续续传。"""
     tmp = f'{target}.remotefm-{uuid.uuid4().hex[:8]}.part'
@@ -1659,6 +1673,8 @@ table.file-table tbody tr:hover{background:#f8f9fc}
 table.file-table tbody tr.selected{background:#e8ecfb}
 table.file-table td{padding:8px 14px;font-size:13px;color:#4a5568;border-bottom:1px solid #f2f4f8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 table.file-table td.name-cell{display:flex;align-items:center;gap:8px;color:#2c3e50;user-select:none}
+table.file-table td.name-cell .dir-name{cursor:pointer}
+table.file-table td.name-cell .dir-name:hover{color:#4a6cf7;text-decoration:underline}
 table.file-table .file-icon{flex-shrink:0;width:22px;display:flex;align-items:center;justify-content:center;color:#4a6cf7}
 table.file-table .file-icon .ico{width:19px;height:19px;stroke-width:1.7}
 table.file-table .row-actions{display:flex;gap:4px;opacity:0;transition:.15s}
@@ -1744,7 +1760,9 @@ table.file-table .row-actions button.danger:hover{background:#fee;color:#e74c3c;
 .upload-panel.collapsed .upload-body{display:none}
 .upload-header{padding:12px 16px;background:linear-gradient(135deg,#4a6cf7,#6a4af7);color:#fff;display:flex;align-items:center;justify-content:space-between;cursor:pointer;user-select:none;gap:8px}
 .upload-header .title{font-size:13px;font-weight:600;display:flex;align-items:center;gap:8px;overflow:hidden;flex:1;min-width:0}
-.upload-header .file-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:400;opacity:.9}
+.upload-header #uploadTitleIcon{display:flex;flex-shrink:0}
+.upload-header #uploadTitleText{flex-shrink:0;white-space:nowrap}
+.upload-header .file-name{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:400;opacity:.9}
 .upload-header .toggle{flex-shrink:0;transition:transform .2s;width:16px;display:flex;align-items:center;justify-content:center}
 .upload-header .toggle .ico{width:14px;height:14px}
 .upload-header .title .ico{width:15px;height:15px}
@@ -2217,7 +2235,7 @@ if(push){histStack=histStack.slice(0,histIdx+1);if(histStack[histStack.length-1]
  render();updCrumb();updNav();updStatus();updTermCwd();treeReveal()}catch(e){toast('加载失败: '+e.message,'error')}}
 function render(){const tb=$('fileList'),emp=$('emptyState');if(!currentItems.length){tb.innerHTML='';emp.style.display='block';return}emp.style.display='none';
 let h='';currentItems.forEach((it,idx)=>{const sel=selected.has(it.path)?'selected':'';const prev=isPrev(it);
-h+=`<tr class="${sel}" data-idx="${idx}" data-path="${esc(it.path)}"><td class="name-cell"><span class="file-icon">${fileIcon(it)}</span><span>${esc(it.name)}</span></td><td>${esc(it.mtime_str)}</td><td>${esc(it.size_str)}</td><td><div class="row-actions">${prev?`<button onclick="event.stopPropagation();openPreview(currentItems[${idx}])">查看</button>`:''}${`<button onclick="event.stopPropagation();downloadItem(currentItems[${idx}])"${it.is_dir?' title="打包为 ZIP 下载"':''}>下载</button>`}${(it.ext==='zip'||it.ext==='7z')?`<button onclick="event.stopPropagation();extractOne('${esc(it.path)}')">解压</button>`:''}<button onclick="event.stopPropagation();showRename(currentItems[${idx}])">重命名</button><button class="danger" onclick="event.stopPropagation();deleteOne('${esc(it.path)}','${esc(it.name)}')">删除</button></div></td></tr>`});
+h+=`<tr class="${sel}" data-idx="${idx}" data-path="${esc(it.path)}"><td class="name-cell"><span class="file-icon">${fileIcon(it)}</span><span class="${it.is_dir?'dir-name':''}">${esc(it.name)}</span></td><td>${esc(it.mtime_str)}</td><td>${esc(it.size_str)}</td><td><div class="row-actions">${prev?`<button onclick="event.stopPropagation();openPreview(currentItems[${idx}])">查看</button>`:''}${`<button onclick="event.stopPropagation();downloadItem(currentItems[${idx}])"${it.is_dir?' title="打包为 ZIP 下载"':''}>下载</button>`}${(it.ext==='zip'||it.ext==='7z')?`<button onclick="event.stopPropagation();extractOne('${esc(it.path)}')">解压</button>`:''}<button onclick="event.stopPropagation();showRename(currentItems[${idx}])">重命名</button><button class="danger" onclick="event.stopPropagation();deleteOne('${esc(it.path)}','${esc(it.name)}')">删除</button></div></td></tr>`});
 tb.innerHTML=h;tb.querySelectorAll('tr').forEach(tr=>{tr.addEventListener('click',onRowClick);tr.addEventListener('dblclick',onRowDblClick);tr.addEventListener('contextmenu',onRowCtx)});
 $('sortName').innerHTML=sortBy==='name'?ico(order==='asc'?'chevron-up':'chevron-down'):'';$('sortMtime').innerHTML=sortBy==='mtime'?ico(order==='asc'?'chevron-up':'chevron-down'):'';$('sortSize').innerHTML=sortBy==='size'?ico(order==='asc'?'chevron-up':'chevron-down'):''}
 function updCrumb(){const bc=$('breadcrumb');let h=`<span class="crumb ${currentPath===''?'current':''}" onclick="navigate('')">${ico('home')}根目录</span>`;const parts=currentPath.split('/').filter(Boolean);let acc='';
@@ -2231,7 +2249,8 @@ function goUp(){if(!currentPath)return;navigate(currentPath.split('/').slice(0,-
 function refresh(){load(currentPath,false)}
 function doSearch(){keyword=$('searchInput').value.trim();load(currentPath,false)}
 document.querySelectorAll('th.sortable').forEach((th,i)=>{th.addEventListener('click',()=>{const k=i===0?'name':i===1?'mtime':'size';if(sortBy===k)order=order==='asc'?'desc':'asc';else{sortBy=k;order='asc'}refresh()})});
-function onRowClick(e){const tr=e.currentTarget,idx=+tr.dataset.idx,p=tr.dataset.path;
+function onRowClick(e){const tr=e.currentTarget,idx=+tr.dataset.idx,p=tr.dataset.path;const it=currentItems[idx];
+if(!e.ctrlKey&&!e.shiftKey&&it&&it.is_dir&&e.target.closest('.name-cell')){navigate(it.path);return}
 if(e.ctrlKey||e.metaKey){if(selected.has(p))selected.delete(p);else selected.add(p);lastIdx=idx}
 else if(e.shiftKey&&lastIdx>=0){const[a,b]=[Math.min(lastIdx,idx),Math.max(lastIdx,idx)];for(let i=a;i<=b;i++)selected.add(currentItems[i].path)}
 else{selected.clear();selected.add(p);lastIdx=idx}
@@ -2370,7 +2389,7 @@ async function worker(){while(true){if(upAbort)throw new Error('已取消');if(f
 try{const res=await upChunkRetry(i,blob,target);if(!res.success)throw new Error(`分片 ${i+1} 失败: ${res.message}`);fin++}catch(err){failed=err;throw err}}}
 try{const ws=[];for(let k=0;k<CONCURRENCY;k++)ws.push(worker());await Promise.all(ws);
 const mr=await fretry('/merge_chunks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({file_uid:upUid,file_name:f.name,total_chunks:total,current_path:target})});const md=await mr.json();
-if(md.success){upShownBytes=f.size;upShownPct=100;$('uploadProgressFill').style.width='100%';$('uploadProgressFill').textContent='100%';$('uploadedSize').textContent=fmtSize(f.size);$('remainingTime').textContent='0秒';$('currentChunk').textContent=total;$('totalChunks').textContent=total;markUpDone();$('uploadFileName').textContent=`— ${f.name} 成功`;toast(`「${f.name}」成功`,'success');refresh();upCloseTimer=setTimeout(()=>{closeUploadPanel();upCloseTimer=null},1500);return true}
+if(md.success){upShownBytes=f.size;upShownPct=100;$('uploadProgressFill').style.width='100%';$('uploadProgressFill').textContent='100%';$('uploadedSize').textContent=fmtSize(f.size);$('remainingTime').textContent='0秒';$('currentChunk').textContent=total;$('totalChunks').textContent=total;markUpDone();const saved=md.name||f.name;const renamed=saved!==f.name;$('uploadFileName').textContent=`— ${saved} 成功`;toast(renamed?`已存在同名文件，另存为「${saved}」`:`「${saved}」成功`,'success');refresh();upCloseTimer=setTimeout(()=>{closeUploadPanel();upCloseTimer=null},renamed?3000:1500);return true}
 throw new Error(md.message)}
 catch(e){const msg=(e&&e.message)?e.message:String(e);
 if(upAbort||msg.includes('已取消')){markUploadCancelled();return false}
@@ -3542,8 +3561,11 @@ def api_merge():
     total, cur = int(d.get('total_chunks',0)), d.get('current_path','')
     if not uid or not name: return jsonify({'success':False,'message':'参数缺失'})
     tp = os.path.join(abspath(cur), _safe_local_name(name, 'upload.bin'))
+    tp = unique_target_path(tp)              # 同名文件已存在时另存为「名称-数字.扩展名」
     ok, msg = merge_chunks(uid, name, total, tp)
-    return jsonify({'success':ok,'message':msg})
+    return jsonify({'success':ok,'message':msg,
+                    'name': os.path.basename(tp) if ok else '',
+                    'path': rel_to_root(tp) if ok else ''})
 
 
 @app.route('/download/<path:path>')

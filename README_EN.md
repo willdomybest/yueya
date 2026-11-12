@@ -217,7 +217,7 @@ Browse, search, sort, multi-select; copy / move / delete / create folders; ZIP c
 
 ### Upload and transfer
 
-8MB chunked uploads with resume; if an upload fails, use the “Retry resume” button in the failure panel to continue from the chunks already uploaded. In-browser preview for images / video / text, and a URL box that lets the server download the file for you.
+8MB chunked uploads with resume; if an upload fails, use the “Retry resume” button in the failure panel to continue from the chunks already uploaded. When the target folder already has a file with the same name, the upload is saved as `name-1.ext` instead of overwriting or failing. In-browser preview for images / video / text, and a URL box that lets the server download the file for you.
 
 ![Upload](screenshots/upload.png)
 
