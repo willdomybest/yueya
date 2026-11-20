@@ -15,7 +15,7 @@
 
 ### Option 1: download the portable build (Windows, no Python needed)
 
-Grab `RemoteFM-v1.6.0-windows-x64.zip` from the [releases page](https://github.com/willdomybest/yueya/releases/latest),
+Grab `RemoteFM-v1.7.0-windows-x64.zip` from the [releases page](https://github.com/willdomybest/yueya/releases/latest),
 unzip it and double-click `RemoteFM.exe` — **no Python, no dependencies, no installer**, it just runs.
 
 > In China you can also download from [Gitee Releases](https://gitee.com/willdomybest/yueya/releases/latest).
@@ -69,6 +69,7 @@ Open a browser and you are looking at that computer's files. Upload, download, p
 | 🌐 **FTP** | Shares the account and root directory with the web UI — paste the link into Explorer and drag files; steadier for very large files |
 | 💻 **Terminal** | Multi-tab terminal with live output, history and Tab completion; tabs are kept server-side, so unclosed tabs return on the next login, and closing a tab force-stops its command |
 | ⚙️ **Processes** | CPU and memory usage plus full command lines; kill a stuck process in one click |
+| 🖥️ **Remote desktop** | Click "Desktop" in the toolbar (left of "Processes") to drive this machine's screen in a new tab: DXGI capture with tiled JPEG (roughly 7% of one core and 0.3 Mbps in typical use; capture stops by itself when nobody is watching), full screen leaves only the picture; on phones the bottom bar inserts text at the remote caret, ⌫ sends a remote backspace and ⌨ opens a standard 60% keyboard (QWERTY, digits and symbols, arrows, Home/End/PgUp/PgDn) where Ctrl/Alt/Shift/Win latch on one tap and release on the next, so Ctrl+C, Ctrl+← and Alt+Tab behave like the real thing; drag to scroll, tap for a left click, long-press 550ms for a right click. The 64px tile under the cursor is always refreshed, so hover highlights never lag, and the canvas shows the remote screen itself without a drawn pointer. The "start with Windows" switch left of the root-directory button registers the exe under `HKCU\...\Run` (off by default) |
 
 ## One line before you start
 

@@ -15,7 +15,7 @@
 
 ### 方式一：下载免安装版（Windows，不需要 Python）
 
-到 [发行版页面](https://gitee.com/willdomybest/yueya/releases/latest) 下载 `RemoteFM-v1.6.0-windows-x64.zip`，
+到 [发行版页面](https://gitee.com/willdomybest/yueya/releases/latest) 下载 `RemoteFM-v1.7.0-windows-x64.zip`，
 解压后双击 `RemoteFM.exe` 就能用——**不用装 Python、不用装依赖、没有安装过程**，解压即跑。
 
 > 能访问 GitHub 的话也可以从 [GitHub Releases](https://github.com/willdomybest/yueya/releases/latest) 下载；
@@ -67,6 +67,7 @@ python RemoteFM.py
 | 🌐 **FTP 直传** | 与网页共用账号和根目录，复制链接粘进资源管理器就能拖拽，几十 GB 的大文件更稳 |
 | 💻 **网页终端** | 多标签终端，命令实时回显、历史、Tab 补全；标签保存在服务端，下次登录还能看到未关闭的标签，关闭标签会强制结束对应命令 |
 | ⚙️ **进程管理** | CPU / 内存占用与完整命令行一目了然，一键结束卡死的进程 |
+| 🖥️ **远程桌面** | 点工具栏「桌面」（在「进程」左边），新标签页里直接操作这台电脑的桌面：DXGI 采集 + 分块 JPEG，典型场景约 7% 单核 / 0.3 Mbps，静止或没人看时自动停采，全屏时只留画面。手机上底部有输入条——发送的文字直接插到远程光标处、⌫ 远程退格；⌨ 展开标准 60% 键盘（QWERTY、数字符号、方向键、Home/End/PgUp/PgDn），Ctrl/Alt/Shift/Win 点一下锁定按住、再点松开，可做 Ctrl+C、Ctrl+←、Alt+Tab 等组合键；单指拖动滚动、轻点左键、长按 550ms 右键；画面只显示远端真实画面（不再叠加自绘箭头），光标所在分片每帧必传，悬停高亮和输入焦点不会因为分块差分被判成“没变化”而漏掉。标题栏「根目录」左边的「开机自启动」开关可让程序随 Windows 登录启动（默认关闭，指向 exe 本身） |
 
 ## 用之前，请先读这一句
 

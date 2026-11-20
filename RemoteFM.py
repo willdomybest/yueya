@@ -15,7 +15,7 @@ RemoteFM —— 单文件远程文件管理器（网页文件管理 + FTP + 网�
 # requires-python = ">=3.8"
 # dependencies = ["flask>=2.0", "requests>=2.25", "pyftpdlib>=1.5.7"]
 # ///
-import os, sys, time, ipaddress, hmac, ssl, base64, shutil, zipfile, json, uuid, threading, logging, tempfile, subprocess, signal, queue, re, shlex, socket, hashlib, platform as sysplat
+import os, sys, time, ipaddress, hmac, ssl, base64, shutil, zipfile, json, uuid, threading, logging, tempfile, subprocess, signal, queue, re, shlex, socket, hashlib, ctypes, platform as sysplat
 from urllib.parse import urlparse, urlsplit, urlunsplit, unquote, quote
 from flask import Flask, request, send_file, render_template_string, jsonify, Response, stream_with_context, abort, session, redirect
 from werkzeug.utils import secure_filename
@@ -1511,6 +1511,11 @@ body{font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;font-size
 .root-btn .ico{width:14px;height:14px;opacity:.85}
 .logout-btn{display:inline-flex;align-items:center;gap:5px}
 .title-actions{display:flex;gap:8px;align-items:center}
+.title-bar .switch-wrap{padding:0 10px;height:28px;font-size:12px;white-space:nowrap}
+.title-bar .switch-wrap:hover{background:rgba(255,255,255,.22)}
+.title-bar .switch-wrap .switch{width:34px;height:18px;border-radius:9px}
+.title-bar .switch-wrap .switch .knob{width:14px;height:14px}
+.title-bar .switch-wrap .switch.on .knob{left:18px}
 .root-btn{display:flex;align-items:center;gap:6px;background:rgba(255,255,255,.15);border:1px solid rgba(255,255,255,.25);border-radius:6px;padding:5px 12px;color:#fff;font-size:12px;cursor:pointer;transition:.15s;max-width:60%;overflow:hidden}
 .root-btn:hover{background:rgba(255,255,255,.25)}
 .root-btn .label{opacity:.8;flex-shrink:0}
@@ -1949,6 +1954,7 @@ table.process-table tbody tr:hover .process-actions{opacity:1}
 <div class="app">
 <div class="title-bar"><h1><svg class="ico" aria-hidden="true"><use href="#i-folder"></use></svg><span>文件管理器</span></h1>
 <div class="title-actions">
+<label class="switch-wrap" id="autoWrap" onclick="toggleAutostart()" title="登录 Windows 后自动启动 RemoteFM（默认关闭）"><span class="switch" id="autoSwitch"><span class="knob"></span></span><span>开机自启动</span></label>
 <button class="root-btn" onclick="showRootModal()" title="点击更改根目录"><span class="label">根目录</span><span class="path" id="rootPathDisplay">{{ROOT_DIR or '整台计算机'}}</span><svg class="ico" aria-hidden="true"><use href="#i-edit"></use></svg></button>
 <a class="logout-btn" href="/logout" title="退出登录"><svg class="ico" aria-hidden="true"><use href="#i-logout"></use></svg><span>退出</span></a>
 </div>
@@ -1967,6 +1973,7 @@ table.process-table tbody tr:hover .process-actions{opacity:1}
 <button class="btn" onclick="showMkdir()"><svg class="ico" aria-hidden="true"><use href="#i-folder-plus"></use></svg>新建文件夹</button>
 <button class="btn" onclick="showRemoteDownload()"><svg class="ico" aria-hidden="true"><use href="#i-cloud-download"></use></svg>远程下载</button>
 <button class="btn" id="btnTerminal" onclick="toggleTerminal()"><svg class="ico" aria-hidden="true"><use href="#i-terminal"></use></svg>终端</button>
+<button class="btn" id="btnRemote" onclick="window.open('/remote','_blank')" title="在新标签页打开远程桌面"><svg class="ico" aria-hidden="true"><use href="#i-monitor"></use></svg>桌面</button>
 <button class="btn" id="btnProcess" onclick="openProcessPanel()"><svg class="ico" aria-hidden="true"><use href="#i-cpu"></use></svg>进程</button>
 <button class="btn" id="btnUsers" onclick="openUserPanel()"><svg class="ico" aria-hidden="true"><use href="#i-users"></use></svg><span id="userName">用户</span></button>
 </div>
@@ -2810,7 +2817,7 @@ async function loadMe(){try{const r=await fretry('/api/me');const d=await r.json
   if(d.success){me=d;const b=$('userName');if(b)b.textContent=d.name;const t=$('userTag');if(t)t.textContent=d.admin?'超级用户':'普通用户';applyRole()}}catch(e){}}
 function applyRole(){
   if(me.admin)return;
-  ['btnProcess','btnTerminal'].forEach(id=>{const b=$(id);if(b)b.style.display='none'});
+  ['btnProcess','btnTerminal','btnRemote','autoWrap'].forEach(id=>{const b=$(id);if(b)b.style.display='none'});
   const rb=document.querySelector('.root-btn');if(rb)rb.style.display='none';
   ['terminalPanel','processPanel'].forEach(id=>{const e=$(id);if(e)e.style.display='none'});
   ['btnUsers'].forEach(id=>{const e=$(id);if(e)e.style.display='none'});   // 用户管理仅超级用户可见
@@ -3007,7 +3014,19 @@ async function delUser(n){if(!confirm('确定删除用户 '+n+' ？该用户将�
     const d=await r.json();if(d.success){toast('已删除 '+n,'success');loadUsers()}else toast(d.error||'删除失败','error')}catch(e){toast(e.message,'error')}}
 function pickUserRoot(){pickerOpen('为该用户选择根目录',abs=>{if($('nfRoot'))$('nfRoot').value=abs||'';},'',true)}
 
-(async()=>{await loadMe();await loadInitRoot();loadFtpInfo();await treeInit();load('');if(me.admin)initTerm()})();
+/* ================= 开机自启动开关（标题栏，根目录左边） ================= */
+let autoBusy=false;
+function autoHint(d){return (d.enabled?'已开启，登录 Windows 后自动运行：':'未开启，点击加入开机自启动：')+(d.target||'')}
+async function loadAutostart(){try{const d=await (await fretry('/api/autostart')).json();
+  const s=$('autoSwitch'),w=$('autoWrap');if(s)s.classList.toggle('on',!!d.enabled);if(w)w.title=autoHint(d)}catch(e){}}
+async function toggleAutostart(){const s=$('autoSwitch'),w=$('autoWrap');if(!s||autoBusy)return;
+  autoBusy=true;const next=!s.classList.contains('on');
+  try{const d=await (await fretry('/api/autostart',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:next})})).json();
+    s.classList.toggle('on',!!d.enabled);if(w)w.title=autoHint(d);toast(d.message||'已更新',d.ok?'success':'error')}
+  catch(e){toast('设置失败','error')}
+  autoBusy=false}
+
+(async()=>{await loadMe();await loadInitRoot();loadFtpInfo();loadAutostart();await treeInit();load('');if(me.admin)initTerm()})();
 </script></body></html>'''
 
 
@@ -4395,6 +4414,119 @@ class LBServer(ThreadedWSGIServer):
             conn, addr = super().get_request()         # 明文已服务完，继续等下一个连接
 
 
+# ================= 开机自启动（HKCU Run，无需管理员） =================
+_RUN_KEY = r'Software\Microsoft\Windows\CurrentVersion\Run'
+_RUN_NAME = 'RemoteFM'
+
+
+def _launch_command():
+    """启动项要写的命令行：打包后指向 exe 本身，源码运行指向 pythonw + 脚本。"""
+    if getattr(sys, 'frozen', False):
+        return f'"{os.path.abspath(sys.executable)}"'
+    python = os.path.join(os.path.dirname(sys.executable), 'pythonw.exe')
+    if not os.path.exists(python):
+        python = sys.executable
+    script = os.path.abspath(sys.argv[0]) if sys.argv and sys.argv[0] else ''
+    return f'"{python}" "{script}"' if script else f'"{python}"'
+
+
+def autostart_state():
+    enabled, command = False, ''
+    if os.name == 'nt':
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RUN_KEY) as key:
+                command = str(winreg.QueryValueEx(key, _RUN_NAME)[0])
+            enabled = bool(command.strip())
+        except (OSError, ImportError):
+            pass
+    return {'enabled': enabled, 'command': command, 'target': _launch_command(),
+            'frozen': bool(getattr(sys, 'frozen', False))}
+
+
+def set_autostart(enabled):
+    if os.name != 'nt':
+        return False, '仅支持 Windows'
+    try:
+        import winreg
+        if enabled:
+            cmd = _launch_command()
+            with winreg.CreateKey(winreg.HKEY_CURRENT_USER, _RUN_KEY) as key:
+                winreg.SetValueEx(key, _RUN_NAME, 0, winreg.REG_SZ, cmd)
+            return True, '已加入开机自启动'
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RUN_KEY, 0, winreg.KEY_SET_VALUE) as key:
+            try:
+                winreg.DeleteValue(key, _RUN_NAME)
+            except FileNotFoundError:
+                pass
+        return True, '已取消开机自启动'
+    except (OSError, ImportError) as exc:
+        return False, str(exc)
+
+
+# ================= 远程桌面 =================
+def _remote_admin():
+    """远程桌面会抓整屏、注入键鼠，只允许管理员使用。"""
+    return bool(current_user().get('admin'))
+
+
+@app.route('/remote')
+def remote_page():
+    if not _remote_admin():
+        abort(403)
+    import remotefm_remote
+    return Response(remotefm_remote.PAGE, mimetype='text/html; charset=utf-8')
+
+
+@app.route('/remote/info')
+def remote_info():
+    if not _remote_admin():
+        abort(403)
+    import remotefm_remote
+    return jsonify(remotefm_remote.info())
+
+
+@app.route('/remote/stream')
+def remote_stream():
+    if not _remote_admin():
+        abort(403)
+    import remotefm_remote
+    return Response(remotefm_remote.stream_iter(remotefm_remote.engine()),
+                    mimetype='application/octet-stream',
+                    headers={'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no'})
+
+
+@app.route('/remote/input', methods=['POST'])
+def remote_input():
+    if not _remote_admin():
+        abort(403)
+    import remotefm_remote
+    eng = remotefm_remote.engine()
+    eng.wake()
+    # 前端务必带 Content-Type: application/json；force 兜底，避免静默丢消息
+    data = request.get_json(silent=True, force=True) or {}
+    t = data.get('t')
+    if t in ('m', 'ld', 'rd') and 'x' in data and 'y' in data:
+        eng.mark_input(data['x'], data['y'])
+    if t in ('ld', 'rd'):
+        eng.mark_dirty(data.get('x', 0), data.get('y', 0), 360)      # 点击处强制重发，菜单/焦点变化不漏
+    elif t in ('txt', 'kd', 'tap') and eng.last_pos:
+        eng.mark_dirty(eng.last_pos[0], eng.last_pos[1], 420)        # 输入/按键按在光标附近
+    remotefm_remote.inject(data)
+    return jsonify({'ok': True})
+
+
+@app.route('/api/autostart', methods=['GET', 'POST'])
+def api_autostart():
+    if not _remote_admin():
+        abort(403)
+    if request.method == 'GET':
+        return jsonify(autostart_state())
+    data = request.get_json(silent=True, force=True) or {}
+    ok, message = set_autostart(bool(data.get('enabled')))
+    return jsonify(dict(autostart_state(), ok=ok, message=message))
+
+
 class QH(WSGIRequestHandler):
     protocol_version = 'HTTP/1.1'
     def log_request(self, code='-', size='-'): pass
@@ -4402,6 +4534,15 @@ class QH(WSGIRequestHandler):
 
 
 if __name__ == '__main__':
+    # 远程桌面按物理像素抓屏；进程必须是 DPI 感知的，否则 GetSystemMetrics 会被虚拟化到 1536×864
+    if os.name == 'nt':
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)
+        except Exception:                                   # noqa: BLE001
+            try:
+                ctypes.windll.user32.SetProcessDPIAware()
+            except Exception:                               # noqa: BLE001
+                pass
     if len(sys.argv) > 2 and sys.argv[1] == '--encrypt':
         # 用法：python RemoteFM.py --encrypt "要加密的密码"
         # 按配置文件的 encryption.type / seed 生成密文，粘贴到对应配置项即可。

@@ -37,6 +37,7 @@ APP_NAME = 'RemoteFM'
 PKGS = (
     'flask', 'werkzeug', 'jinja2', 'itsdangerous', 'click', 'blinker', 'markupsafe',
     'requests', 'urllib3', 'certifi', 'charset-normalizer', 'idna', 'pyftpdlib', 'cryptography', 'psutil',
+    'numpy', 'pillow', 'dxcam', 'comtypes',
 )
 LICENSE_HINTS = ('license', 'copying', 'notice', 'authors', 'copyright')
 
@@ -115,7 +116,10 @@ def build_binary():
     icon = os.path.join(BUILD, 'icon.ico')
     write_icon(icon)
     cmd = [sys.executable, '-m', 'PyInstaller', '--noconfirm', '--clean', '--onefile',
-           '--hidden-import', 'remotefm_mcp', '--name', APP_NAME, '--icon', icon, 'RemoteFM.py']
+           '--hidden-import', 'remotefm_mcp', '--hidden-import', 'remotefm_remote',
+           '--hidden-import', 'dxcam', '--hidden-import', 'dxcam.core.dxgi_duplicator',
+           '--hidden-import', 'comtypes', '--hidden-import', 'PIL.Image',
+           '--name', APP_NAME, '--icon', icon, 'RemoteFM.py']
     subprocess.check_call(cmd, cwd=ROOT)
 
 
